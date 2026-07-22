@@ -12,9 +12,10 @@ import { renderPdf } from './pdf.js';
 
 let state = store.loadState();
 
-// Nome da pessoa a partir do chat id (fallback quando o gasto não tem banco).
-function autorDoChat(chatId) {
-  const idx = config.allowedChatIds.indexOf(String(chatId));
+// Nome da pessoa a partir do id de quem enviou (fallback quando o gasto não tem banco).
+// Em grupo recebe o from.id (a pessoa), não o id do grupo.
+function autorDoChat(fromId) {
+  const idx = config.allowedChatIds.indexOf(String(fromId));
   // Convenção: 1º chat autorizado = Eduardo, 2º = Maria (ajuste em ALLOWED_CHAT_IDS).
   return idx === 1 ? 'Maria' : 'Eduardo';
 }
@@ -119,16 +120,19 @@ function parseMonthArg(arg) {
 }
 
 // Recebeu um lançamento lido (de texto/áudio/foto): deriva dono e pede confirmação.
-async function proporLancamento(chatId, lidoBruto, origem) {
-  const l = applyDono({ ...lidoBruto, origem }, autorDoChat(chatId));
-  state.pending[chatId] = l;
+// chatId = onde responder (grupo ou privado); fromId = quem enviou (autor + chave da confirmação).
+async function proporLancamento(chatId, fromId, lidoBruto, origem) {
+  const l = applyDono({ ...lidoBruto, origem }, autorDoChat(fromId));
+  state.pending[fromId] = l;
   store.saveState(state);
   await tg.sendMessage(chatId, resumo(l));
 }
 
 async function handleMessage(msg) {
-  const chatId = msg.chat.id;
-  if (!isAllowed(chatId)) {
+  const chatId = msg.chat.id;          // onde responder (grupo ou privado)
+  const fromId = msg.from?.id ?? chatId; // quem enviou (autor + autorização + confirmação)
+  // Em grupo, autoriza por PESSOA (from.id), não pelo id do grupo.
+  if (!isAllowed(fromId)) {
     await tg.sendMessage(chatId, 'Desculpe, este bot é de uso restrito.');
     return;
   }
@@ -140,7 +144,7 @@ async function handleMessage(msg) {
       const best = msg.photo[msg.photo.length - 1]; // maior resolução
       const { buffer, mime } = await tg.downloadFile(best.file_id, 'image/jpeg');
       const lido = await readFromImage(buffer, mime);
-      await proporLancamento(chatId, lido, 'foto');
+      await proporLancamento(chatId, fromId, lido, 'foto');
     } catch (e) {
       await tg.sendMessage(chatId, `❌ Não consegui ler a foto: ${e.message}`);
     }
@@ -155,7 +159,7 @@ async function handleMessage(msg) {
       const { buffer, mime } = await tg.downloadFile(audio.file_id, 'audio/ogg');
       const texto = await transcribe(buffer, mime);
       const lido = await readFromText(texto);
-      await proporLancamento(chatId, lido, 'audio');
+      await proporLancamento(chatId, fromId, lido, 'audio');
     } catch (e) {
       await tg.sendMessage(chatId, `❌ Áudio: ${e.message}`);
     }
@@ -203,7 +207,7 @@ async function handleMessage(msg) {
         return;
       }
       case '/cancelar':
-        delete state.pending[chatId];
+        delete state.pending[fromId];
         store.saveState(state);
         await tg.sendMessage(chatId, 'Confirmação pendente descartada.');
         return;
@@ -213,22 +217,22 @@ async function handleMessage(msg) {
     }
   }
 
-  // Resposta a uma confirmação pendente.
-  const pending = state.pending[chatId];
+  // Resposta a uma confirmação pendente (isolada por pessoa via fromId).
+  const pending = state.pending[fromId];
   if (pending) {
     if (/^(sim|s|ok|confirmo?|confirmar|👍|✅)$/i.test(text)) {
       store.addLancamento(pending, store.monthKey());
-      delete state.pending[chatId];
+      delete state.pending[fromId];
       store.saveState(state);
       await tg.sendMessage(chatId, '✅ Lançamento gravado. Pode mandar o próximo!');
     } else {
       // Correção em linguagem natural.
       await tg.sendChatAction(chatId, 'typing');
       try {
-        const corrigido = applyDono(await applyCorrection(pending, text), autorDoChat(chatId));
-        state.pending[chatId] = { ...corrigido, origem: pending.origem };
+        const corrigido = applyDono(await applyCorrection(pending, text), autorDoChat(fromId));
+        state.pending[fromId] = { ...corrigido, origem: pending.origem };
         store.saveState(state);
-        await tg.sendMessage(chatId, resumo(state.pending[chatId]));
+        await tg.sendMessage(chatId, resumo(state.pending[fromId]));
       } catch (e) {
         await tg.sendMessage(chatId, `❌ Não consegui aplicar a correção: ${e.message}`);
       }
@@ -240,7 +244,7 @@ async function handleMessage(msg) {
   await tg.sendChatAction(chatId, 'typing');
   try {
     const lido = await readFromText(text);
-    await proporLancamento(chatId, lido, 'texto');
+    await proporLancamento(chatId, fromId, lido, 'texto');
   } catch (e) {
     await tg.sendMessage(chatId, `❌ Não entendi o lançamento: ${e.message}. Use /ajuda.`);
   }
