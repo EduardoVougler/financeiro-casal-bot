@@ -1,0 +1,12 @@
+# Segredos — NUNCA versionar
+.env
+
+# Dependências (o servidor reinstala sozinho)
+node_modules/
+
+# Dados e relatórios gerados em runtime
+data/
+reports/
+*.pdf
+*.html
+npm-debug.log

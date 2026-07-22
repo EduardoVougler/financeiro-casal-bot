@@ -1,0 +1,33 @@
+name: build-and-push
+
+# Toda vez que você der "push" no GitHub, ele constrói a imagem do bot
+# e publica no registro de imagens do GitHub (ghcr.io). O Portainer só baixa a pronta.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {} # permite disparar manualmente pelo site também
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # necessário para publicar a imagem no ghcr.io
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Logar no registro do GitHub (ghcr.io)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construir e publicar a imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: ./bot
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/eduardovougler/financeiro-casal-bot:latest

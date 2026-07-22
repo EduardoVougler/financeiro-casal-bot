@@ -1,0 +1,14 @@
+{
+  "name": "financeiro-casal-bot",
+  "version": "1.0.0",
+  "description": "Bot de Telegram de controle financeiro do casal (Eduardo e Maria) — lê texto/áudio/foto, confirma lançamentos e gera relatórios (PDF)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0",
+    "marked": "^15.0.0"
+  }
+}

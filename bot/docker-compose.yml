@@ -1,0 +1,31 @@
+services:
+  financeiro-casal-bot:
+    # Imagem pronta construída pelo GitHub (ghcr.io). No Swarm não dá para usar "build:".
+    image: ghcr.io/eduardovougler/financeiro-casal-bot:latest
+    environment:
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # Transcrição de áudio (Groq Whisper). Opcional — sem ela, áudio é recusado.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      STT_MODEL: ${STT_MODEL:-whisper-large-v3-turbo}
+      # Os dois chats autorizados: Eduardo e Maria (separados por vírgula).
+      ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS}
+      # Para quem enviar os PDFs automáticos (default = primeiro autorizado).
+      REPORT_CHAT_ID: ${REPORT_CHAT_ID:-}
+      MODEL: ${MODEL:-claude-opus-4-8}
+      TZ: ${TZ:-America/Fortaleza}
+      # Fechamento mensal: dia 1 às 9h fecha o mês anterior.
+      MONTHLY_DAY: ${MONTHLY_DAY:-1}
+      MONTHLY_HOUR: ${MONTHLY_HOUR:-9}
+      # Fechamento anual: sempre em 31/12, à hora abaixo.
+      ANNUAL_HOUR: ${ANNUAL_HOUR:-20}
+    volumes:
+      - financeiro-casal-data:/data
+    # No Swarm, "restart" vira deploy.restart_policy.
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+volumes:
+  financeiro-casal-data:
