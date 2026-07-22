@@ -60,9 +60,9 @@ const AJUDA = [
   'Ex.: "gastei 154,90 no mercado no crédito do Nubank" ou "recebi 3000 de salário".',
   '',
   'Comandos:',
-  '/relatorio — PDF parcial do mês atual',
-  '/fechar — PDF de fechamento do mês passado',
-  '/anual — PDF do ano atual (parcial)',
+  '/relatorio — PDF do mês atual (ou passe um mês: `/relatorio 2026-08`, `/relatorio 08`, `/relatorio agosto`)',
+  '/fechar — PDF de fechamento do mês passado (também aceita um mês: `/fechar 2026-08`)',
+  '/anual — PDF do ano atual (ou passe o ano: `/anual 2025`)',
   '/cancelar — descarta a confirmação pendente',
   '/ajuda — mostra esta ajuda',
 ].join('\n');
@@ -91,6 +91,31 @@ async function gerarEnviarAnual(chatId, yearStr, { parcial }) {
   const base = `relatorio-anual-${yearStr}${parcial ? '-parcial' : ''}`;
   const pdf = renderPdf(html, base);
   await tg.sendDocument(chatId, pdf, `Relatório anual ${parcial ? 'parcial' : 'de fechamento'} — ${yearStr}`);
+}
+
+const MESES = {
+  janeiro: 1, fevereiro: 2, marco: 3, 'março': 3, abril: 4, maio: 5, junho: 6,
+  julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12,
+};
+
+function normMonth(y, mo) {
+  if (mo < 1 || mo > 12) return null;
+  return `${y}-${String(mo).padStart(2, '0')}`;
+}
+
+// Interpreta o argumento de mês de /relatorio e /fechar. Aceita:
+//   "2026-08" | "2026/8" | "08" | "8" (ano corrente) | "agosto" | "agosto de 2025".
+// Devolve a chave "YYYY-MM" ou null se não reconhecer.
+function parseMonthArg(arg) {
+  const s = arg.trim().toLowerCase();
+  const anoAtual = new Date().getFullYear();
+  let m = s.match(/^(\d{4})[-/](\d{1,2})$/);
+  if (m) return normMonth(+m[1], +m[2]);
+  m = s.match(/^([a-zç]+)(?:\s+de\s+(\d{4}))?$/);
+  if (m && MESES[m[1]] != null) return normMonth(m[2] ? +m[2] : anoAtual, MESES[m[1]]);
+  m = s.match(/^(\d{1,2})$/);
+  if (m) return normMonth(anoAtual, +m[1]);
+  return null;
 }
 
 // Recebeu um lançamento lido (de texto/áudio/foto): deriva dono e pede confirmação.
@@ -149,14 +174,34 @@ async function handleMessage(msg) {
         await tg.sendMessage(chatId, AJUDA);
         return;
       case '/relatorio':
-        await gerarEnviar(chatId, store.monthKey(), { parcial: true });
+      case '/fechar': {
+        const arg = text.split(/\s+/).slice(1).join(' ').trim();
+        let mk;
+        if (arg) {
+          mk = parseMonthArg(arg);
+          if (!mk) {
+            await tg.sendMessage(chatId, 'Mês inválido. Ex.: `/relatorio 2026-08`, `/relatorio 08` ou `/relatorio agosto`.');
+            return;
+          }
+        } else {
+          mk = cmd.toLowerCase() === '/fechar' ? store.previousMonthKey() : store.monthKey();
+        }
+        await gerarEnviar(chatId, mk, { parcial: mk === store.monthKey() });
         return;
-      case '/fechar':
-        await gerarEnviar(chatId, store.previousMonthKey(), { parcial: false });
+      }
+      case '/anual': {
+        const arg = text.split(/\s+/).slice(1).join(' ').trim();
+        let yk = store.yearKey();
+        if (arg) {
+          if (!/^\d{4}$/.test(arg)) {
+            await tg.sendMessage(chatId, 'Ano inválido. Ex.: `/anual 2025`.');
+            return;
+          }
+          yk = arg;
+        }
+        await gerarEnviarAnual(chatId, yk, { parcial: yk === store.yearKey() });
         return;
-      case '/anual':
-        await gerarEnviarAnual(chatId, store.yearKey(), { parcial: true });
-        return;
+      }
       case '/cancelar':
         delete state.pending[chatId];
         store.saveState(state);
