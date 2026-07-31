@@ -32,22 +32,23 @@ const lancamentoSchema = {
     descricao: { type: 'string', description: 'Descrição curta do lançamento. Vazio se não houver.' },
     data: { type: 'string', description: 'Data DD/MM. Use "hoje" se não for citada.' },
     competencia: {
-      type: ['string', 'null'],
+      anyOf: [{ type: 'string' }, { type: 'null' }],
       description:
         'Mês de referência no formato YYYY-MM, quando a mensagem indicar a que mês os lançamentos pertencem (ex.: "informações já de agosto" => "2026-08"). null se nenhum mês for citado.',
     },
     banco: {
-      type: ['string', 'null'],
+      anyOf: [{ type: 'string' }, { type: 'null' }],
       description:
         'Banco de origem do gasto: Nubank, Banco do Brasil, Inter ou Bradesco. null para entradas ou se não citado.',
     },
+    // Valor fixo + null precisa de anyOf: a API rejeita `type: ['string','null']`
+    // combinado com `enum` ("Enum value 'credito' does not match declared type").
     forma_pagamento: {
-      type: ['string', 'null'],
-      enum: ['credito', 'debito', null],
+      anyOf: [{ type: 'string', enum: ['credito', 'debito'] }, { type: 'null' }],
       description: 'Como o gasto foi pago: credito (fatura) ou debito. null para entradas ou se não citado.',
     },
     autor: {
-      type: ['string', 'null'],
+      anyOf: [{ type: 'string' }, { type: 'null' }],
       description:
         'Pessoa citada na mensagem como dona DESTE lançamento (ex.: "Eduardo", "Duda", "Maria"), normalmente entre parênteses ou logo após o valor. null se ninguém for citado.',
     },
