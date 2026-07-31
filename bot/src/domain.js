@@ -5,6 +5,24 @@
 
 export const PESSOAS = ['Eduardo', 'Maria'];
 
+// Apelidos que aparecem nas mensagens -> pessoa canônica. É aqui que se adiciona
+// um novo jeito de chamar alguém (chave em minúsculas, sem acento não é tratado).
+const APELIDOS = {
+  eduardo: 'Eduardo',
+  edu: 'Eduardo',
+  du: 'Eduardo',
+  maria: 'Maria',
+  duda: 'Maria',
+  'maria eduarda': 'Maria',
+};
+
+// Resolve um nome/apelido livre para a pessoa canônica (ou null se não reconhecer).
+export function resolvePessoa(raw) {
+  if (!raw) return null;
+  const k = String(raw).trim().toLowerCase();
+  return APELIDOS[k] || (PESSOAS.includes(String(raw).trim()) ? String(raw).trim() : null);
+}
+
 // banco (chave normalizada) -> { nome de exibição, dono }
 export const BANCOS = {
   nubank: { nome: 'Nubank', dono: 'Maria' },

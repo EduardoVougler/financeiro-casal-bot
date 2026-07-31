@@ -31,27 +31,42 @@ function br(n) {
     : n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function resumo(l) {
-  const linhas = [
-    `📝 Li este lançamento:`,
-    ``,
-    `• Tipo: ${l.tipo === 'entrada' ? 'Entrada (recebimento)' : 'Saída (gasto)'}`,
-    `• Valor: R$ ${br(l.valor)}`,
-    `• Categoria: ${l.categoria || '—'}`,
-    `• Pessoa: ${l.autor || '—'}`,
-  ];
+function itemResumo(l, i, total) {
+  const linhas = [total > 1 ? `${i + 1}) ${l.descricao || l.categoria || 'Lançamento'}` : ''];
+  linhas.push(`• Tipo: ${l.tipo === 'entrada' ? 'Entrada (recebimento)' : 'Saída (gasto)'}`);
+  linhas.push(`• Valor: R$ ${br(l.valor)}`);
+  linhas.push(`• Categoria: ${l.categoria || '—'}`);
+  linhas.push(`• Pessoa: ${l.autor || '—'}`);
   if (l.tipo === 'saida') {
     linhas.push(`• Banco: ${l.banco ? nomeDoBanco(l.banco) : '—'}`);
     linhas.push(`• Forma: ${l.forma_pagamento || '—'}`);
   }
   linhas.push(`• Data: ${l.data || 'hoje'}`);
-  if (l.descricao) linhas.push(`• Descrição: ${l.descricao}`);
+  // Só destaca o mês quando não é o corrente — é o caso em que gravar errado passaria batido.
+  const mes = mesDoLancamento(l);
+  if (mes !== store.monthKey()) linhas.push(`• Mês: ${mes}`);
+  if (total === 1 && l.descricao) linhas.push(`• Descrição: ${l.descricao}`);
   if (l.observacao) linhas.push(`⚠️ ${l.observacao}`);
-  linhas.push(
-    ``,
-    `Confirma? Responda *SIM* para gravar, ou escreva a correção (ex.: "foi no débito", "valor é 154,90").`
+  return linhas.filter(Boolean).join('\n');
+}
+
+// Uma mensagem pode gerar vários lançamentos — o resumo (e a confirmação) valem para o lote.
+function resumo(lista) {
+  const total = lista.length;
+  const partes = [
+    total === 1 ? '📝 Li este lançamento:' : `📝 Li ${total} lançamentos:`,
+    ...lista.map((l, i) => itemResumo(l, i, total)),
+  ];
+  if (total > 1) {
+    const entradas = lista.filter((l) => l.tipo === 'entrada').reduce((s, l) => s + l.valor, 0);
+    const saidas = lista.filter((l) => l.tipo === 'saida').reduce((s, l) => s + l.valor, 0);
+    partes.push(`Total: entradas R$ ${br(entradas)} · saídas R$ ${br(saidas)}`);
+  }
+  const alvo = total === 1 ? 'gravar' : `gravar os ${total}`;
+  partes.push(
+    `Confirma? Responda *SIM* para ${alvo}, ou escreva a correção (ex.: "o 2 é da Duda", "valor é 154,90").`
   );
-  return linhas.join('\n');
+  return partes.join('\n\n');
 }
 
 const AJUDA = [
@@ -59,6 +74,13 @@ const AJUDA = [
   '',
   'Mande o lançamento por *texto*, *áudio* ou *foto* do comprovante — eu leio, mostro os dados e peço confirmação antes de gravar.',
   'Ex.: "gastei 154,90 no mercado no crédito do Nubank" ou "recebi 3000 de salário".',
+  '',
+  'Pode mandar *vários de uma vez*, um por linha — eu leio todos e confirmo o lote.',
+  'Se a primeira linha disser o mês, ele vale para o bloco inteiro:',
+  '`Informações de agosto:`',
+  '`Salário escritório: recebido R$ 2800,00`',
+  '`Fatura Banco do Brasil: 666,00 (Eduardo)`',
+  '`809,00 (Duda)`',
   '',
   'Comandos:',
   '/relatorio — PDF do mês atual (ou passe um mês: `/relatorio 2026-08`, `/relatorio 08`, `/relatorio agosto`)',
@@ -119,13 +141,29 @@ function parseMonthArg(arg) {
   return null;
 }
 
-// Recebeu um lançamento lido (de texto/áudio/foto): deriva dono e pede confirmação.
+// Mês de destino, em ordem: competência declarada no cabeçalho ("informações de
+// agosto") > data do próprio lançamento (DD/MM) > mês atual. Sem isso, um bloco
+// enviado em 31/07 referente a agosto cairia todo em julho.
+function mesDoLancamento(l) {
+  const c = String(l.competencia || '').match(/^(\d{4})-(\d{2})$/);
+  if (c && +c[2] >= 1 && +c[2] <= 12) return `${c[1]}-${c[2]}`;
+  const m = String(l.data || '').match(/^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?$/);
+  if (!m) return store.monthKey();
+  const mes = +m[2];
+  if (mes < 1 || mes > 12) return store.monthKey();
+  let ano = m[3] ? +m[3] : new Date().getFullYear();
+  if (ano < 100) ano += 2000;
+  return `${ano}-${String(mes).padStart(2, '0')}`;
+}
+
+// Recebeu os lançamentos lidos (de texto/áudio/foto): deriva dono e pede confirmação.
+// Uma mensagem pode trazer vários — a confirmação é do lote inteiro.
 // chatId = onde responder (grupo ou privado); fromId = quem enviou (autor + chave da confirmação).
-async function proporLancamento(chatId, fromId, lidoBruto, origem) {
-  const l = applyDono({ ...lidoBruto, origem }, autorDoChat(fromId));
-  state.pending[fromId] = l;
+async function proporLancamentos(chatId, fromId, lidosBrutos, origem) {
+  const lista = lidosBrutos.map((l) => applyDono({ ...l, origem }, autorDoChat(fromId)));
+  state.pending[fromId] = lista;
   store.saveState(state);
-  await tg.sendMessage(chatId, resumo(l));
+  await tg.sendMessage(chatId, resumo(lista));
 }
 
 async function handleMessage(msg) {
@@ -143,10 +181,11 @@ async function handleMessage(msg) {
     try {
       const best = msg.photo[msg.photo.length - 1]; // maior resolução
       const { buffer, mime } = await tg.downloadFile(best.file_id, 'image/jpeg');
-      const lido = await readFromImage(buffer, mime);
-      await proporLancamento(chatId, fromId, lido, 'foto');
+      const lidos = await readFromImage(buffer, mime);
+      await proporLancamentos(chatId, fromId, lidos, 'foto');
     } catch (e) {
-      await tg.sendMessage(chatId, `❌ Não consegui ler a foto: ${e.message}`);
+      console.error('[foto]', e);
+      await tg.sendMessage(chatId, `❌ Não consegui ler a foto: ${e.message}`, { markdown: false });
     }
     return;
   }
@@ -158,10 +197,11 @@ async function handleMessage(msg) {
     try {
       const { buffer, mime } = await tg.downloadFile(audio.file_id, 'audio/ogg');
       const texto = await transcribe(buffer, mime);
-      const lido = await readFromText(texto);
-      await proporLancamento(chatId, fromId, lido, 'audio');
+      const lidos = await readFromText(texto);
+      await proporLancamentos(chatId, fromId, lidos, 'audio');
     } catch (e) {
-      await tg.sendMessage(chatId, `❌ Áudio: ${e.message}`);
+      console.error('[audio]', e);
+      await tg.sendMessage(chatId, `❌ Áudio: ${e.message}`, { markdown: false });
     }
     return;
   }
@@ -171,8 +211,10 @@ async function handleMessage(msg) {
 
   // Comandos.
   if (text.startsWith('/')) {
-    const [cmd] = text.split(/\s+/);
-    switch (cmd.toLowerCase()) {
+    // Em grupo o Telegram entrega "/relatorio@NomeDoBot" — descarta o sufixo.
+    const [cmdRaw] = text.split(/\s+/);
+    const cmd = cmdRaw.split('@')[0].toLowerCase();
+    switch (cmd) {
       case '/start':
       case '/ajuda':
         await tg.sendMessage(chatId, AJUDA);
@@ -218,23 +260,32 @@ async function handleMessage(msg) {
   }
 
   // Resposta a uma confirmação pendente (isolada por pessoa via fromId).
+  // O pendente é sempre uma lista; estados gravados antes disso eram um objeto só.
   const pending = state.pending[fromId];
   if (pending) {
+    const lista = Array.isArray(pending) ? pending : [pending];
     if (/^(sim|s|ok|confirmo?|confirmar|👍|✅)$/i.test(text)) {
-      store.addLancamento(pending, store.monthKey());
+      for (const l of lista) store.addLancamento(l, mesDoLancamento(l));
       delete state.pending[fromId];
       store.saveState(state);
-      await tg.sendMessage(chatId, '✅ Lançamento gravado. Pode mandar o próximo!');
+      const quantos = lista.length === 1 ? 'Lançamento gravado' : `${lista.length} lançamentos gravados`;
+      await tg.sendMessage(chatId, `✅ ${quantos}. Pode mandar o próximo!`);
     } else {
-      // Correção em linguagem natural.
+      // Correção em linguagem natural, aplicada sobre o lote inteiro.
       await tg.sendChatAction(chatId, 'typing');
       try {
-        const corrigido = applyDono(await applyCorrection(pending, text), autorDoChat(fromId));
-        state.pending[fromId] = { ...corrigido, origem: pending.origem };
+        const origem = lista[0]?.origem;
+        const corrigidos = (await applyCorrection(lista, text)).map((l) =>
+          applyDono({ ...l, origem }, autorDoChat(fromId))
+        );
+        state.pending[fromId] = corrigidos;
         store.saveState(state);
-        await tg.sendMessage(chatId, resumo(state.pending[fromId]));
+        await tg.sendMessage(chatId, resumo(corrigidos));
       } catch (e) {
-        await tg.sendMessage(chatId, `❌ Não consegui aplicar a correção: ${e.message}`);
+        console.error('[correcao]', e);
+        await tg.sendMessage(chatId, `❌ Não consegui aplicar a correção: ${e.message}`, {
+          markdown: false,
+        });
       }
     }
     return;
@@ -243,10 +294,13 @@ async function handleMessage(msg) {
   // Texto solto → tratar como novo lançamento.
   await tg.sendChatAction(chatId, 'typing');
   try {
-    const lido = await readFromText(text);
-    await proporLancamento(chatId, fromId, lido, 'texto');
+    const lidos = await readFromText(text);
+    await proporLancamentos(chatId, fromId, lidos, 'texto');
   } catch (e) {
-    await tg.sendMessage(chatId, `❌ Não entendi o lançamento: ${e.message}. Use /ajuda.`);
+    console.error('[texto]', e);
+    await tg.sendMessage(chatId, `❌ Não entendi o lançamento: ${e.message}. Use /ajuda.`, {
+      markdown: false,
+    });
   }
 }
 

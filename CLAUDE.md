@@ -29,11 +29,19 @@ Estas restrições não são óbvias pelo código e devem ser respeitadas em qua
 - **Categorização deve ser extensível.** Novas categorias surgem com o uso; evite enum fixo — prefira dados/config que possam crescer sem mudar código.
 - **Toda agregação tem duas dimensões: por pessoa e total.** Qualquer valor consolidado (por categoria, por banco, saldo) deve poder ser visto individualmente (Eduardo / Maria) e somado (casal).
 - **Todo gasto tem um banco de origem e uma forma de pagamento.** Cada gasto (avulso ou não) sai de um banco, via **crédito** (entra na fatura do cartão) ou **débito** (sai direto da conta). O mesmo banco pode ser usado nas duas formas. O lançamento precisa capturar **banco** + **forma de pagamento** (crédito/débito) — o parsing infere isso da mensagem (ex.: "no crédito", "no débito", "débito", "cartão").
-- **O banco pertence a uma pessoa e define o dono do gasto.** O mapeamento banco → pessoa deriva automaticamente o autor:
+- **O dono do gasto tem precedência: pessoa citada na mensagem > dono do banco > quem enviou.** O mapeamento banco → pessoa é o padrão:
   - **Maria** → Nubank, Banco do Brasil
   - **Eduardo** → Inter, Bradesco
 
-  Modele os bancos como dados/config (novos bancos podem surgir), com o mapeamento banco → pessoa. "Fatura" é a soma dos gastos de **crédito** de um banco no mês; débito não entra na fatura, mas ainda é rastreado por banco/pessoa.
+  Mas quando a mensagem nomeia a pessoa daquele lançamento, o nome vence o banco — é o que permite **dividir a fatura de um cartão compartilhado** entre os dois (ex.: "Fatura Banco do Brasil: 666,00 (Eduardo) / 809,00 (Duda)" gera um gasto do Eduardo e um da Maria, ambos no BB). Modele os bancos como dados/config (novos bancos podem surgir), com o mapeamento banco → pessoa. "Fatura" é a soma dos gastos de **crédito** de um banco no mês; débito não entra na fatura, mas ainda é rastreado por banco/pessoa.
+
+- **Pessoas têm apelidos.** As mensagens usam apelidos ("Duda" = Maria). O mapeamento apelido → pessoa canônica é dado em `domain.js` (`APELIDOS`/`resolvePessoa`), extensível como os bancos.
+
+- **Uma mensagem pode conter vários lançamentos.** O casal manda blocos ("salário X; despesas: fatura Y (Eduardo), Z (Duda)"). A extração devolve sempre uma **lista**, a confirmação é do **lote inteiro** (um `SIM` grava todos) e a correção em linguagem natural é reaplicada sobre a lista ("o 2 é da Duda"). Linhas com só valor + nome herdam o contexto da linha anterior (mesmo banco/forma/categoria).
+
+- **O mês de destino vem do lançamento, não da data do envio.** Precedência em `mesDoLancamento` (`index.js`): **competência declarada > data do lançamento (DD/MM) > mês atual**. A `competencia` (`YYYY-MM`) é preenchida pela extração quando a mensagem traz um **cabeçalho de mês** ("informações já de agosto:"), e vale para **todos** os lançamentos do bloco — é o que permite fechar agosto ainda em julho. Competência malformada é ignorada (cai no mês atual) em vez de gravar em lugar errado. Como o modelo não sabe a data corrente, `extract.js` injeta "hoje" no turno do usuário — sem isso não há como resolver "agosto" para o ano certo.
+
+- **O resumo de confirmação mostra o mês só quando ele não é o corrente.** É exatamente o caso em que gravar no mês errado passaria despercebido; no dia a dia a linha não aparece e não polui.
 
 ## Stack
 
@@ -75,10 +83,10 @@ Mesmo pipeline do transfausto:
 Código em `bot/src/`:
 
 1. **`index.js`** — loop principal (long-polling), roteia mensagens: foto/áudio/texto → extração; comandos (`/relatorio`, `/fechar`, `/anual`, `/cancelar`, `/ajuda`); e o fluxo de **confirmação** ("li isto, confirma? responda SIM ou corrija em texto") antes de gravar. Roda o `tickSchedule` (fechamentos mensal e anual). Define o **autor de fallback** pelo chat id (1º autorizado = Eduardo, 2º = Maria).
-2. **`telegram.js`** — cliente da Bot API (`getUpdates`, `sendMessage`, `sendDocument`, `downloadFile` para foto e áudio) via fetch. `sendMessage` usa `parse_mode: Markdown`.
-3. **`extract.js`** — texto/foto → JSON do lançamento via Claude + `json_schema`; `applyCorrection` (correção em linguagem natural); `applyDono` deriva o **autor a partir do banco** (fonte da verdade), com fallback em quem enviou.
+2. **`telegram.js`** — cliente da Bot API (`getUpdates`, `sendMessage`, `sendDocument`, `downloadFile` para foto e áudio) via fetch. `sendMessage` usa `parse_mode: Markdown` **com fallback para texto puro**: descrições vindas do modelo e mensagens de erro podem ter `*`/`_` soltos, e o Telegram rejeita o envio inteiro com `400 can't parse entities`. Mensagens de erro são enviadas com `{ markdown: false }`.
+3. **`extract.js`** — texto/foto → **lista** de lançamentos via Claude + `json_schema` (raiz `{ lancamentos: [...] }`, cada item com `competencia`); `applyCorrection` (correção em linguagem natural sobre a lista); `applyDono` resolve o autor por precedência **pessoa citada > dono do banco > quem enviou**. `contextoDeHoje()` injeta a data corrente em toda chamada (texto, foto e correção).
 4. **`transcribe.js`** — áudio (OGG) → texto via Groq Whisper; o texto volta para `extract.js`.
-5. **`domain.js`** — bancos (Nubank/BB → Maria; Inter/Bradesco → Eduardo), `resolveBanco`/`donoDoBanco`, e as listas de categorias. **É aqui que se adiciona banco ou categoria** — é dado, não código espalhado.
+5. **`domain.js`** — bancos (Nubank/BB → Maria; Inter/Bradesco → Eduardo), `resolveBanco`/`donoDoBanco`, apelidos de pessoas (`resolvePessoa`) e as listas de categorias. **É aqui que se adiciona banco, apelido ou categoria** — é dado, não código espalhado.
 6. **`store.js`** — persistência JSON: `state.json` e `months/<YYYY-MM>.json`; `monthKey`/`previousMonthKey`, `addLancamento`, e `yearKey`/`loadYear` (consolida os 12 meses para o anual).
 7. **`report.js`** — HTML dos relatórios. Seções reutilizáveis (KPIs, por pessoa, por categoria, por banco) compartilhadas por `buildReportHtml` (mensal, com detalhe de lançamentos) e `buildAnnualReportHtml` (anual, com a seção **mês a mês**).
 8. **`pdf.js`** — CSS de design + HTML → PDF A4 via Chromium.

@@ -1,12 +1,15 @@
-// Extração de um LANÇAMENTO (entrada ou saída) a partir de texto ou foto, com Claude.
+// Extração de LANÇAMENTOS (entradas e saídas) a partir de texto ou foto, com Claude.
 // Saída estruturada via json_schema. Também aplica correções em linguagem natural.
 //
-// O BANCO define o dono do gasto — a derivação do autor é feita em applyDono(), não
-// pelo modelo, para não depender da leitura.
+// Uma mensagem pode conter VÁRIOS lançamentos (ex.: "salário 2800; fatura BB 666
+// (Eduardo) e 809 (Duda)"), por isso o schema devolve uma lista.
+//
+// Dono do lançamento, em ordem de precedência: pessoa citada na mensagem > dono do
+// banco > quem enviou. Ver applyDono().
 
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from './config.js';
-import { resolveBanco, donoDoBanco } from './domain.js';
+import { resolveBanco, donoDoBanco, resolvePessoa } from './domain.js';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
@@ -24,10 +27,15 @@ const lancamentoSchema = {
     categoria: {
       type: 'string',
       description:
-        'Categoria. Saídas: Alimentação/mercado, Uber, iFood, Gasolina, Outros… Entradas: Salário, Freela, Reembolso, Outros. Use a que melhor encaixar; crie nova se necessário.',
+        'Categoria. Saídas: Alimentação/mercado, Uber, iFood, Gasolina, Fatura, Outros… Entradas: Salário, Freela, Reembolso, Outros. Use a que melhor encaixar; crie nova se necessário.',
     },
     descricao: { type: 'string', description: 'Descrição curta do lançamento. Vazio se não houver.' },
     data: { type: 'string', description: 'Data DD/MM. Use "hoje" se não for citada.' },
+    competencia: {
+      type: ['string', 'null'],
+      description:
+        'Mês de referência no formato YYYY-MM, quando a mensagem indicar a que mês os lançamentos pertencem (ex.: "informações já de agosto" => "2026-08"). null se nenhum mês for citado.',
+    },
     banco: {
       type: ['string', 'null'],
       description:
@@ -38,15 +46,44 @@ const lancamentoSchema = {
       enum: ['credito', 'debito', null],
       description: 'Como o gasto foi pago: credito (fatura) ou debito. null para entradas ou se não citado.',
     },
+    autor: {
+      type: ['string', 'null'],
+      description:
+        'Pessoa citada na mensagem como dona DESTE lançamento (ex.: "Eduardo", "Duda", "Maria"), normalmente entre parênteses ou logo após o valor. null se ninguém for citado.',
+    },
     observacao: { type: 'string', description: 'Nota/incerteza de leitura. Vazio se não houver.' },
   },
-  required: ['tipo', 'valor', 'categoria', 'descricao', 'data', 'banco', 'forma_pagamento', 'observacao'],
+  required: [
+    'tipo',
+    'valor',
+    'categoria',
+    'descricao',
+    'data',
+    'competencia',
+    'banco',
+    'forma_pagamento',
+    'autor',
+    'observacao',
+  ],
 };
 
-const SYSTEM = `Você registra lançamentos financeiros de um casal (Eduardo e Maria) a partir de mensagens de texto ou fotos de comprovantes/notas.
+// A resposta é sempre uma LISTA — mesmo quando há um único lançamento.
+const respostaSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    lancamentos: { type: 'array', items: lancamentoSchema },
+  },
+  required: ['lancamentos'],
+};
+
+const SYSTEM = `Você registra lançamentos financeiros de um casal (Eduardo e Maria, também chamada de Duda) a partir de mensagens de texto ou fotos de comprovantes/notas.
+
+UMA MENSAGEM PODE CONTER VÁRIOS LANÇAMENTOS. Extraia TODOS, um item por valor citado.
+Uma linha com apenas um valor e um nome (ex.: "809,00 (Duda)") logo abaixo de outra linha herda dela o contexto (mesmo banco, mesma forma de pagamento, mesma categoria) e é um lançamento próprio.
 
 Classifique cada lançamento:
-- "saida" (gasto/despesa): ex. "gastei", "paguei", "comprei", "mercado", "uber", "ifood", "gasolina".
+- "saida" (gasto/despesa): ex. "gastei", "paguei", "comprei", "fatura", "mercado", "uber", "ifood", "gasolina".
 - "entrada" (recebimento/renda): ex. "recebi", "salário", "caiu", "entrou", "freela", "reembolso".
 
 Para GASTOS, capture quando possível:
@@ -54,36 +91,61 @@ Para GASTOS, capture quando possível:
 - forma de pagamento: "credito" (fatura do cartão) ou "debito" (sai direto da conta).
   Dicas: "no crédito"/"cartão"/"fatura" => credito; "no débito"/"débito"/"na conta" => debito.
 
+Em "autor", registre a pessoa citada para AQUELE lançamento (o nome entre parênteses ou junto do valor). Não invente: se ninguém for citado, use null.
+
+CABEÇALHO DE MÊS: se a mensagem abrir dizendo a que mês os lançamentos se referem ("vou enviar as informações já de agosto:", "referente a julho", "fechamento de 08/2026"), preencha "competencia" com esse mês em YYYY-MM em TODOS os lançamentos do bloco — inclusive nos que não repetem o mês. Use o ano corrente, salvo quando o mês citado for claramente do passado recente (ex.: em janeiro, "dezembro" é o ano anterior). Se a mensagem não citar mês nenhum, "competencia" é null. Um lançamento com data própria (ex.: "05/08 mercado") mantém essa data em "data"; "competencia" continua sendo o mês do cabeçalho.
+
 Valores em número decimal com ponto (ex.: 154.90). Não use separador de milhar.
-Se um campo não existir, use null (banco/forma) ou string vazia (texto). Se a data não for citada, use "hoje".
+Se um campo não existir, use null (banco/forma/autor) ou string vazia (texto). Se a data não for citada, use "hoje".
 Se não tiver certeza de algo, registre em "observacao".`;
 
-// Deriva o autor a partir do banco (fonte da verdade). Se não houver banco reconhecido,
-// usa `fallbackAutor` (quem enviou a mensagem).
+// Deriva o autor: pessoa citada na mensagem > dono do banco > quem enviou.
+// O banco também é normalizado para a chave canônica.
 export function applyDono(lancamento, fallbackAutor) {
   const bancoKey = resolveBanco(lancamento.banco);
-  const autor = donoDoBanco(bancoKey) || fallbackAutor || null;
+  const autor =
+    resolvePessoa(lancamento.autor) || donoDoBanco(bancoKey) || fallbackAutor || null;
   return { ...lancamento, banco: bancoKey, autor };
 }
 
 async function extract(messages) {
   const response = await client.messages.create({
     model: config.model,
-    max_tokens: 1500,
+    max_tokens: 4000,
     system: SYSTEM,
-    output_config: { format: { type: 'json_schema', schema: lancamentoSchema } },
+    output_config: { format: { type: 'json_schema', schema: respostaSchema } },
     messages,
   });
   const text = response.content.find((b) => b.type === 'text')?.text ?? '{}';
-  return JSON.parse(text);
+  const parsed = JSON.parse(text);
+  const lista = Array.isArray(parsed.lancamentos) ? parsed.lancamentos : [];
+  if (!lista.length) throw new Error('Nenhum lançamento identificado na mensagem.');
+  return lista;
 }
 
-// Texto livre -> lançamento.
+// O modelo precisa da data atual para resolver "hoje" e para transformar um
+// cabeçalho como "de agosto" na competência YYYY-MM certa. Segue o TZ do processo.
+function contextoDeHoje() {
+  const agora = new Date();
+  const dia = agora.toLocaleDateString('pt-BR');
+  return `Hoje é ${dia} (mês corrente ${monthKeyOf(agora)}).`;
+}
+
+function monthKeyOf(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// Texto livre -> lista de lançamentos.
 export function readFromText(texto) {
-  return extract([{ role: 'user', content: `Registre este lançamento: "${texto}"` }]);
+  return extract([
+    {
+      role: 'user',
+      content: `${contextoDeHoje()}\n\nRegistre os lançamentos desta mensagem: "${texto}"`,
+    },
+  ]);
 }
 
-// Foto (comprovante/nota) -> lançamento.
+// Foto (comprovante/nota) -> lista de lançamentos.
 export function readFromImage(buffer, mime) {
   const base64 = buffer.toString('base64');
   return extract([
@@ -91,21 +153,26 @@ export function readFromImage(buffer, mime) {
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: mime, data: base64 } },
-        { type: 'text', text: 'Extraia o lançamento desta imagem seguindo o schema.' },
+        {
+          type: 'text',
+          text: `${contextoDeHoje()}\n\nExtraia os lançamentos desta imagem seguindo o schema.`,
+        },
       ],
     },
   ]);
 }
 
-// Aplica uma correção em linguagem natural sobre um lançamento já lido.
-export function applyCorrection(current, correctionText) {
+// Aplica uma correção em linguagem natural sobre os lançamentos já lidos.
+// Recebe e devolve a LISTA inteira (a correção pode citar um item específico).
+export function applyCorrection(currentList, correctionText) {
   return extract([
     {
       role: 'user',
       content:
-        `Dados atuais do lançamento (JSON):\n${JSON.stringify(current, null, 2)}\n\n` +
+        `${contextoDeHoje()}\n\n` +
+        `Lançamentos atuais (JSON):\n${JSON.stringify(currentList, null, 2)}\n\n` +
         `Correção do usuário: "${correctionText}"\n\n` +
-        `Devolva o JSON corrigido, mantendo os demais campos.`,
+        `Devolva a lista corrigida por inteiro, mantendo os itens e campos não citados na correção.`,
     },
   ]);
 }

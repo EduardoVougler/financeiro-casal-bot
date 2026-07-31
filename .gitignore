@@ -1,0 +1,8 @@
+# Prints e fotos de tela usados para depurar (conversas privadas) — não versionar
+*.png
+*.jpg
+*.jpeg
+Captura de Tela*
+
+# macOS
+.DS_Store

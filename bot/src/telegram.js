@@ -33,8 +33,17 @@ export async function getUpdates(offset, timeout = 30) {
   return json.result;
 }
 
-export function sendMessage(chatId, text) {
-  return call('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown' });
+// Texto vindo do modelo (descrição do lançamento) ou de mensagens de erro pode ter
+// `*`, `_` ou `` ` `` soltos e quebrar o parser do Telegram (400 can't parse entities).
+// Melhor entregar sem formatação do que não entregar.
+export async function sendMessage(chatId, text, { markdown = true } = {}) {
+  if (!markdown) return call('sendMessage', { chat_id: chatId, text });
+  try {
+    return await call('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown' });
+  } catch (e) {
+    if (!/can't parse entities/i.test(e.message)) throw e;
+    return call('sendMessage', { chat_id: chatId, text });
+  }
 }
 
 export function sendChatAction(chatId, action = 'typing') {
