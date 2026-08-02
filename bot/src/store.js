@@ -4,6 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 
 const monthsDir = path.join(config.dataDir, 'months');
@@ -74,14 +75,96 @@ export function loadMonth(key) {
   });
 }
 
+// Vocabulário vivo de categorias: as que o casal JÁ usou, por tipo, mais usadas
+// primeiro. É o que permite deixar a categorização aberta sem virar bagunça — o
+// modelo recebe essa lista e reusa a grafia existente em vez de criar um sinônimo.
+export function categoriasUsadas() {
+  const contagem = { saida: new Map(), entrada: new Map() };
+  let arquivos = [];
+  try {
+    arquivos = fs.readdirSync(monthsDir).filter((f) => f.endsWith('.json'));
+  } catch {
+    return { saida: [], entrada: [] };
+  }
+  for (const f of arquivos) {
+    const mes = readJson(path.join(monthsDir, f), { lancamentos: [] });
+    for (const l of mes.lancamentos || []) {
+      const cat = String(l.categoria || '').trim();
+      if (!cat) continue;
+      const m = contagem[l.tipo === 'entrada' ? 'entrada' : 'saida'];
+      m.set(cat, (m.get(cat) || 0) + 1);
+    }
+  }
+  const porFrequencia = (m) => [...m.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c);
+  return { saida: porFrequencia(contagem.saida), entrada: porFrequencia(contagem.entrada) };
+}
+
 export function saveMonth(month) {
   writeJson(path.join(monthsDir, `${month.key}.json`), month);
+}
+
+// Todo lançamento carrega um `id` estável — é por ele que dá para editar/remover
+// depois. Não pode ser a posição na lista: remover um item deslocaria todos os outros.
+function novoId() {
+  return randomUUID().slice(0, 8);
 }
 
 // Adiciona um lançamento (entrada ou saída) ao mês.
 export function addLancamento(lancamento, key = monthKey()) {
   const month = loadMonth(key);
-  month.lancamentos.push({ ...lancamento, registrado_em: new Date().toISOString() });
+  month.lancamentos.push({ id: novoId(), ...lancamento, registrado_em: new Date().toISOString() });
   saveMonth(month);
   return month;
+}
+
+// Lançamentos gravados antes dos ids ganham um na primeira leitura (migração
+// preguiçosa) — sem isso eles seriam os únicos impossíveis de editar/remover.
+function ensureIds(month) {
+  let mudou = false;
+  for (const l of month.lancamentos) {
+    if (!l.id) {
+      l.id = novoId();
+      mudou = true;
+    }
+  }
+  if (mudou) saveMonth(month);
+  return month;
+}
+
+// Candidatos para editar/remover/listar: mais recentes primeiro, com o mês de cada um.
+// Sem `meses`, olha o mês corrente + o anterior (é o que a pessoa tem em mente).
+export function lancamentosRecentes({ meses, limite = 60 } = {}) {
+  const chaves = meses?.length ? meses : [monthKey(), previousMonthKey()];
+  const itens = [];
+  for (const key of chaves) {
+    const month = ensureIds(loadMonth(key));
+    for (const l of [...month.lancamentos].reverse()) itens.push({ ...l, mes: key });
+  }
+  return itens.slice(0, limite);
+}
+
+// Substitui os campos de um lançamento, preservando id e data de registro.
+export function updateLancamento(key, id, campos) {
+  const month = loadMonth(key);
+  const i = month.lancamentos.findIndex((l) => l.id === id);
+  if (i < 0) return null;
+  const atual = month.lancamentos[i];
+  month.lancamentos[i] = {
+    ...atual,
+    ...campos,
+    id: atual.id,
+    registrado_em: atual.registrado_em,
+    editado_em: new Date().toISOString(),
+  };
+  saveMonth(month);
+  return month.lancamentos[i];
+}
+
+export function removeLancamento(key, id) {
+  const month = loadMonth(key);
+  const i = month.lancamentos.findIndex((l) => l.id === id);
+  if (i < 0) return null;
+  const [removido] = month.lancamentos.splice(i, 1);
+  saveMonth(month);
+  return removido;
 }

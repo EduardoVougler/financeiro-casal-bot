@@ -61,13 +61,60 @@ export function nomeDoBanco(bancoKey) {
   return BANCOS[bancoKey]?.nome || bancoKey || '—';
 }
 
-// Categorias iniciais (a lista cresce com o uso — não é enum fixo).
+// ---- Categorias ----
+//
+// A categorização é ABERTA: vale o que a pessoa escrever. As listas abaixo são só a
+// SEMENTE (o que o bot conhece antes do primeiro lançamento) — o vocabulário real é o
+// que já foi usado nos meses gravados (`store.categoriasUsadas`), e o modelo recebe
+// esse vocabulário para reusar em vez de inventar sinônimo.
 export const CATEGORIAS_SAIDA = [
-  'Alimentação/mercado',
+  'Mercado',
+  'Alimentação/iFood',
   'Uber',
-  'iFood',
   'Gasolina',
+  'Fatura',
   'Outros',
 ];
 
 export const CATEGORIAS_ENTRADA = ['Salário', 'Freela', 'Reembolso', 'Outros'];
+
+// Sinônimos que sempre desembocam na mesma categoria. Existe para os casos que se
+// repetem muito (mercado e alimentação); o resto fica por conta do vocabulário vivo.
+const ALIASES_CATEGORIA = {
+  supermercado: 'Mercado',
+  mercado: 'Mercado',
+  compras: 'Mercado',
+  'compras de mercado': 'Mercado',
+  ifood: 'Alimentação/iFood',
+  'i food': 'Alimentação/iFood',
+  alimentacao: 'Alimentação/iFood',
+  'alimentacao/ifood': 'Alimentação/iFood',
+  delivery: 'Alimentação/iFood',
+  restaurante: 'Alimentação/iFood',
+  lanche: 'Alimentação/iFood',
+  combustivel: 'Gasolina',
+  '99': 'Uber',
+};
+
+// Chave de comparação: sem acento, sem caixa, espaços colapsados.
+function chaveCategoria(s) {
+  return String(s)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Mantém a categoria aberta, mas evita que a MESMA coisa vire duas barras no
+// relatório ("mercado", "Mercado", "Supermercado"). Ordem: alias > grafia já usada
+// em `conhecidas` > o texto da pessoa, capitalizado.
+export function normalizeCategoria(raw, conhecidas = []) {
+  const texto = String(raw ?? '').trim();
+  if (!texto) return 'Outros';
+  const k = chaveCategoria(texto);
+  if (ALIASES_CATEGORIA[k]) return ALIASES_CATEGORIA[k];
+  const jaUsada = conhecidas.find((c) => chaveCategoria(c) === k);
+  if (jaUsada) return jaUsada;
+  return texto.charAt(0).toUpperCase() + texto.slice(1);
+}
