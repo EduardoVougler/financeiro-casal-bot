@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status do projeto
 
-O **bot está implementado** em `bot/`. Prontos: entrada por **texto, áudio (Groq Whisper) e foto**, extração via Claude, confirmação antes de gravar, persistência, e **relatórios mensal e anual** em PDF (HTML desenhado → Chromium) com por pessoa + total, saldo, categorias e banco/forma de pagamento. Falta principalmente: testar com token real do Telegram, ajustar categorias com o uso e criar o repositório Git + deploy.
+O **bot está implementado** em `bot/`, versionado no GitHub e preparado para deploy pelo GHCR/Portainer. Prontos: entrada por **texto, áudio (Groq Whisper) e foto**, extração via Claude, confirmação antes de gravar, edição/remoção conversacional, persistência atômica com backup e **relatórios mensal e anual** em PDF. O mensal separa resumo e extrato compacto. A validação automatizada cobre as regras locais; integrações reais dependem dos tokens e do ambiente de produção.
 
 ## Objetivo do produto
 
@@ -84,7 +84,7 @@ Mesmo pipeline do transfausto:
 
 ## Comandos
 
-- **Rodar local:** `cd bot && npm install && npm start` (precisa de `.env` a partir de `.env.example`, e `chromium` instalado se for gerar PDF localmente — env `CHROMIUM_PATH`).
+- **Rodar local:** `cd bot && npm ci`, configure as variáveis de `.env.example` no ambiente e execute `npm start`. O Node não carrega `.env` automaticamente; como alternativa local, use `node --env-file=.env src/index.js`. Para gerar PDF fora do container, configure `CHROMIUM_PATH`.
 - **Build da imagem:** `docker build -t financeiro-casal ./bot` (ou deixar o GitHub Actions publicar no GHCR).
 - **Testes:** `cd bot && npm test`.
 

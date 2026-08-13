@@ -8,7 +8,8 @@ services:
       # Transcrição de áudio (Groq Whisper). Opcional — sem ela, áudio é recusado.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       STT_MODEL: ${STT_MODEL:-whisper-large-v3-turbo}
-      # Os dois chats autorizados: Eduardo e Maria (separados por vírgula).
+      # Obrigatório: IDs pessoais. Ordem: 1º=Eduardo, 2º=Maria.
+      # Banco não define titular; sem pessoa citada na mensagem, vale o remetente.
       ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS}
       # Para quem enviar os PDFs automáticos (default = primeiro autorizado).
       REPORT_CHAT_ID: ${REPORT_CHAT_ID:-}
@@ -20,6 +21,7 @@ services:
       # Fechamento anual: sempre em 31/12, à hora abaixo.
       ANNUAL_HOUR: ${ANNUAL_HOUR:-20}
     volumes:
+      # Contém state.json, meses e backups .bak; inclua este volume no backup do host.
       - financeiro-casal-data:/data
     # No Swarm, "restart" vira deploy.restart_policy.
     deploy:
