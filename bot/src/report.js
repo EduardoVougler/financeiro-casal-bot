@@ -2,7 +2,8 @@
 // Dois relatórios: mensal (buildReportHtml) e anual (buildAnnualReportHtml),
 // compartilhando as mesmas seções (KPIs, por pessoa, por categoria, por banco).
 
-import { PESSOAS, nomeDoBanco, BANCOS } from './domain.js';
+import { PESSOAS, nomeDoBanco } from './domain.js';
+import { dataParaExibicao } from './dates.js';
 
 const MESES = [
   'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
@@ -28,6 +29,15 @@ function num(v) {
 }
 function formaLabel(f) {
   return f === 'credito' ? 'Crédito' : f === 'debito' ? 'Débito' : f || '';
+}
+function mesmaInformacao(a, b) {
+  const chave = (v) => String(v || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  return Boolean(chave(a)) && chave(a) === chave(b);
 }
 function esc(s) {
   return String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -130,35 +140,42 @@ function sectionCategoria(saidas) {
 }
 
 function sectionBanco(saidas) {
-  let linhas = '';
-  for (const key of Object.keys(BANCOS)) {
-    const doBanco = saidas.filter((l) => l.banco === key);
-    if (!doBanco.length) continue;
-    const cred = soma(doBanco.filter((l) => l.forma_pagamento === 'credito'));
-    const deb = soma(doBanco.filter((l) => l.forma_pagamento === 'debito'));
-    linhas += `
+  // A conta é identificada por banco + pessoa. Assim Nubank/Eduardo e
+  // Nubank/Maria aparecem em linhas separadas, inclusive nas respectivas faturas.
+  const contas = new Map();
+  for (const l of saidas) {
+    const key = `${l.banco || ''}\u0000${l.autor || ''}`;
+    if (!contas.has(key)) contas.set(key, { banco: l.banco, autor: l.autor, lancamentos: [] });
+    contas.get(key).lancamentos.push(l);
+  }
+
+  const ordenadas = [...contas.values()].sort((a, b) => {
+    const banco = nomeDoBanco(a.banco).localeCompare(nomeDoBanco(b.banco), 'pt-BR');
+    return banco || String(a.autor || '').localeCompare(String(b.autor || ''), 'pt-BR');
+  });
+
+  const linhas = ordenadas.map(({ banco, autor, lancamentos }) => {
+    const cred = soma(lancamentos.filter((l) => l.forma_pagamento === 'credito'));
+    const deb = soma(lancamentos.filter((l) => l.forma_pagamento === 'debito'));
+    const semForma = soma(lancamentos.filter(
+      (l) => l.forma_pagamento !== 'credito' && l.forma_pagamento !== 'debito'
+    ));
+    const cor = banco ? (CORES_BANCO[banco] || '#64748b') : '#cbd5e1';
+    return `
       <tr>
-        <td><span class="bank-dot" style="background:${CORES_BANCO[key] || '#999'}"></span>${esc(nomeDoBanco(key))}</td>
-        <td>${esc(BANCOS[key].dono)}</td>
+        <td><span class="bank-dot" style="background:${cor}"></span>${banco ? esc(nomeDoBanco(banco)) : '<i>sem banco</i>'}</td>
+        <td>${esc(autor || '—')}</td>
         <td class="r">${cred ? money(cred) : '—'}</td>
         <td class="r">${deb ? money(deb) : '—'}</td>
-        <td class="r"><b>${money(cred + deb)}</b></td>
+        <td class="r"><b>${money(cred + deb + semForma)}</b></td>
       </tr>`;
-  }
-  const semBanco = saidas.filter((l) => !l.banco);
-  if (semBanco.length) {
-    linhas += `
-      <tr>
-        <td><span class="bank-dot" style="background:#cbd5e1"></span><i>sem banco</i></td>
-        <td>—</td><td class="r">—</td><td class="r">—</td><td class="r"><b>${money(soma(semBanco))}</b></td>
-      </tr>`;
-  }
-  if (!linhas) return '';
+  }).join('');
+  if (!ordenadas.length) return '';
   return `
   <section class="block">
     <h2>Gastos por banco e forma de pagamento</h2>
     <table class="tbl">
-      <thead><tr><th>Banco</th><th>Dono</th><th class="r">Crédito (fatura)</th><th class="r">Débito</th><th class="r">Total</th></tr></thead>
+      <thead><tr><th>Banco</th><th>Titular</th><th class="r">Crédito (fatura)</th><th class="r">Débito</th><th class="r">Total</th></tr></thead>
       <tbody>${linhas}</tbody>
     </table>
   </section>`;
@@ -190,24 +207,36 @@ export function buildReportHtml(month, { parcial = false } = {}) {
   const linhasLanc = lancs
     .map((l) => {
       const isIn = l.tipo === 'entrada';
+      const descricao = String(l.descricao || '').trim();
+      const categoria = String(l.categoria || '').trim();
+      const titulo = descricao || categoria || 'Lançamento';
+      const mostrarCategoria = categoria && !mesmaInformacao(categoria, titulo);
+      const conta = isIn
+        ? (l.autor || '—')
+        : [l.banco ? nomeDoBanco(l.banco) : 'Sem banco', l.autor].filter(Boolean).join(' · ');
+      const forma = !isIn && l.forma_pagamento ? formaLabel(l.forma_pagamento) : '';
       return `
       <tr>
-        <td class="dim">${esc(l.data || '—')}</td>
-        <td><span class="tag ${isIn ? 'tag-in' : 'tag-out'}">${isIn ? 'Entrada' : 'Saída'}</span></td>
-        <td>${esc(l.autor || '—')}</td>
-        <td>${esc(l.categoria || '—')}</td>
-        <td class="dim">${l.banco ? esc(nomeDoBanco(l.banco)) : '—'}${l.forma_pagamento ? ` · ${esc(formaLabel(l.forma_pagamento))}` : ''}</td>
-        <td class="r"><b class="${isIn ? 'pos' : 'neg'}">${money(l.valor)}</b></td>
-        <td class="dim">${esc(l.descricao || '')}</td>
+        <td class="dim">${esc(dataParaExibicao(l))}</td>
+        <td class="movement">
+          <div class="cell-main">${esc(titulo)}</div>
+          ${mostrarCategoria ? `<div class="cell-meta">${esc(categoria)}</div>` : ''}
+        </td>
+        <td class="account">
+          <div class="cell-main">${esc(conta)}</div>
+          ${forma ? `<div class="cell-meta">${esc(forma)}</div>` : ''}
+        </td>
+        <td class="r amount"><b class="${isIn ? 'pos' : 'neg'}">${isIn ? '+' : '−'} ${reais(l.valor)}</b></td>
       </tr>`;
     })
     .join('');
 
   const secLanc = `
-  <section class="block">
-    <h2>Lançamentos do mês <span class="count">${lancs.length}</span></h2>
+  <section class="block ledger-page">
+    <div class="ledger-kicker">Extrato do período</div>
+    <h2>Movimentações <span class="count">${lancs.length}</span></h2>
     <table class="tbl tbl-detail">
-      <thead><tr><th>Data</th><th>Tipo</th><th>Pessoa</th><th>Categoria</th><th>Banco / forma</th><th class="r">Valor</th><th>Descrição</th></tr></thead>
+      <thead><tr><th>Data</th><th>Lançamento</th><th>Conta</th><th class="r">Valor</th></tr></thead>
       <tbody>${linhasLanc}</tbody>
     </table>
   </section>`;

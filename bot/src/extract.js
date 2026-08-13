@@ -8,22 +8,23 @@
 // Uma mensagem pode conter VÁRIOS lançamentos (ex.: "salário 2800; fatura BB 666
 // (Eduardo) e 809 (Duda)"), por isso o schema devolve uma lista.
 //
-// Dono do lançamento, em ordem de precedência: pessoa citada na mensagem > dono do
-// banco > quem enviou. Ver applyDono().
+// Banco e pessoa são independentes: os dois podem ter conta na mesma instituição.
+// A pessoa citada vence; se não houver, vale quem enviou. Ver applyDono().
 
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from './config.js';
 import {
   resolveBanco,
-  donoDoBanco,
-  resolvePessoa,
+  applyDono,
   normalizeCategoria,
   CATEGORIAS_SAIDA,
   CATEGORIAS_ENTRADA,
+  BANCOS_SEMENTE,
+  nomeDoBanco,
 } from './domain.js';
-import { categoriasUsadas } from './store.js';
+import { bancosUsados, categoriasUsadas } from './store.js';
 
-const client = new Anthropic({ apiKey: config.anthropicApiKey });
+const client = new Anthropic({ apiKey: config.anthropicApiKey, timeout: 120_000, maxRetries: 2 });
 
 // Schema de um lançamento do casal.
 const lancamentoSchema = {
@@ -42,7 +43,10 @@ const lancamentoSchema = {
         'Categoria do lançamento. A lista é aberta: reuse uma das categorias conhecidas (enviadas no contexto) quando couber e crie uma nova, com as palavras da própria mensagem, quando nenhuma servir.',
     },
     descricao: { type: 'string', description: 'Descrição curta do lançamento. Vazio se não houver.' },
-    data: { type: 'string', description: 'Data DD/MM. Use "hoje" se não for citada.' },
+    data: {
+      type: 'string',
+      description: 'Data DD/MM. Se não for citada, use a data concreta de hoje informada no contexto.',
+    },
     competencia: {
       anyOf: [{ type: 'string' }, { type: 'null' }],
       description:
@@ -51,7 +55,7 @@ const lancamentoSchema = {
     banco: {
       anyOf: [{ type: 'string' }, { type: 'null' }],
       description:
-        'Banco de origem do gasto: Nubank, Banco do Brasil, Inter ou Bradesco. null para entradas ou se não citado.',
+        'Instituição bancária de origem do gasto. Campo aberto: aceite bancos novos. null para entradas ou se não citado. Banco não determina a pessoa.',
     },
     // Valor fixo + null precisa de anyOf: a API rejeita `type: ['string','null']`
     // combinado com `enum` ("Enum value 'credito' does not match declared type").
@@ -62,7 +66,7 @@ const lancamentoSchema = {
     autor: {
       anyOf: [{ type: 'string' }, { type: 'null' }],
       description:
-        'Pessoa citada na mensagem como dona DESTE lançamento (ex.: "Eduardo", "Duda", "Maria"), normalmente entre parênteses ou logo após o valor. null se ninguém for citado.',
+        'Titular citado para ESTE lançamento (Eduardo, Maria/Duda), em qualquer posição próxima ao banco ou valor. Ex.: "Eduardo Nubank" => Eduardo; "Nubank da Duda" => Maria. null se ninguém for citado.',
     },
     observacao: { type: 'string', description: 'Nota/incerteza de leitura. Vazio se não houver.' },
   },
@@ -147,11 +151,12 @@ Classifique cada lançamento:
 - "entrada" (recebimento/renda): ex. "recebi", "salário", "caiu", "entrou", "freela", "reembolso".
 
 Para GASTOS, capture quando possível:
-- banco de origem: Nubank, Banco do Brasil, Inter ou Bradesco.
+- banco de origem: é campo aberto. Pode ser Nubank, Banco do Brasil, Inter, Bradesco ou qualquer instituição nova mencionada (Itaú, C6, PicPay etc.). Reuse a grafia dos BANCOS CONHECIDOS quando houver correspondência.
 - forma de pagamento: "credito" (fatura do cartão) ou "debito" (sai direto da conta).
   Dicas: "no crédito"/"cartão"/"fatura" => credito; "no débito"/"débito"/"na conta" => debito.
 
-Em "autor", registre a pessoa citada para AQUELE lançamento (o nome entre parênteses ou junto do valor). Não invente: se ninguém for citado, use null.
+BANCO E TITULAR SÃO INDEPENDENTES. Eduardo e Maria possuem contas separadas e podem ter conta na mesma instituição, inclusive ambos no Nubank e ambos no Banco do Brasil. Nunca deduza a pessoa pelo banco.
+Em "autor", registre a pessoa citada para AQUELE lançamento, mesmo sem preposição ou parênteses: "Eduardo Nubank", "Nubank Eduardo", "BB da Duda". Não invente: se ninguém for citado, use null; o sistema usará quem enviou.
 
 CABEÇALHO DE MÊS: se a mensagem abrir dizendo a que mês os lançamentos se referem ("vou enviar as informações já de agosto:", "referente a julho", "fechamento de 08/2026"), preencha "competencia" com esse mês em YYYY-MM em TODOS os lançamentos do bloco — inclusive nos que não repetem o mês. Use o ano corrente, salvo quando o mês citado for claramente do passado recente (ex.: em janeiro, "dezembro" é o ano anterior). Se a mensagem não citar mês nenhum, "competencia" é null. Um lançamento com data própria (ex.: "05/08 mercado") mantém essa data em "data"; "competencia" continua sendo o mês do cabeçalho.
 
@@ -162,17 +167,10 @@ CATEGORIA é campo ABERTO — não há lista fixa. O contexto traz as categorias
 4. Só use "Outros" quando realmente não der para nomear.
 
 Valores em número decimal com ponto (ex.: 154.90). Não use separador de milhar.
-Se um campo não existir, use null (banco/forma/autor) ou string vazia (texto). Se a data não for citada, use "hoje".
+Se um campo não existir, use null (banco/forma/autor) ou string vazia (texto). Se a data não for citada, preencha a data concreta de hoje em DD/MM; nunca escreva literalmente "hoje".
 Se não tiver certeza de algo, registre em "observacao".`;
 
-// Deriva o autor: pessoa citada na mensagem > dono do banco > quem enviou.
-// O banco também é normalizado para a chave canônica.
-export function applyDono(lancamento, fallbackAutor) {
-  const bancoKey = resolveBanco(lancamento.banco);
-  const autor =
-    resolvePessoa(lancamento.autor) || donoDoBanco(bancoKey) || fallbackAutor || null;
-  return { ...lancamento, banco: bancoKey, autor };
-}
+export { applyDono };
 
 const INTENCOES = [
   'lancamento',
@@ -197,6 +195,7 @@ function vocabulario() {
   return {
     saida: juntar(usadas.saida, CATEGORIAS_SAIDA),
     entrada: juntar(usadas.entrada, CATEGORIAS_ENTRADA),
+    bancos: juntar(bancosUsados(), BANCOS_SEMENTE),
   };
 }
 
@@ -205,7 +204,10 @@ function vocabulario() {
 function blocoDeCategorias(vocab) {
   return `\n\nCATEGORIAS CONHECIDAS (reuse a grafia exata quando couber; crie nova só se nenhuma servir):
 - Saídas: ${vocab.saida.join(', ')}
-- Entradas: ${vocab.entrada.join(', ')}`;
+- Entradas: ${vocab.entrada.join(', ')}
+
+BANCOS CONHECIDOS (campo aberto; reuse estes nomes quando couber, mas aceite instituições novas):
+- ${vocab.bancos.map(nomeDoBanco).join(', ')}`;
 }
 
 // Chamada ao modelo -> { intencao, mes, ano, lancamentos }, já normalizado.
@@ -225,6 +227,7 @@ async function extract(messages) {
   const lancamentos = (Array.isArray(parsed.lancamentos) ? parsed.lancamentos : []).map((l) => ({
     ...l,
     categoria: normalizeCategoria(l.categoria, l.tipo === 'entrada' ? vocab.entrada : vocab.saida),
+    banco: resolveBanco(l.banco, vocab.bancos),
   }));
   // Intenção/período fora do formato esperado não podem virar leitura errada:
   // caem no default (lançamento, período corrente).
@@ -291,6 +294,8 @@ const edicaoSchema = {
 
 const SYSTEM_EDICAO = `Você mantém o registro financeiro de um casal (Eduardo e Maria, também chamada de Duda). Recebe a lista de lançamentos JÁ GRAVADOS — cada um com "pos" (posição na lista mostrada) e "id" — e uma instrução em linguagem natural para EDITAR ou REMOVER um ou mais deles.
 
+Banco e pessoa são campos independentes: Eduardo e Maria podem ter contas separadas no mesmo banco. Em uma edição como "o 2 é Eduardo Nubank", altere "autor" para Eduardo e "banco" para Nubank. "Nubank da Duda" significa banco Nubank e autor Maria. Nunca derive a pessoa a partir da instituição. Bancos são campo aberto: aceite uma instituição nova citada pelo usuário.
+
 Identifique o alvo pela instrução, que pode citar:
 - a posição na lista: "o 3", "o segundo", "o último" (o último lançado é o de pos 1, a lista vem do mais recente para o mais antigo);
 - o valor: "aquele de 154,90";
@@ -350,6 +355,7 @@ export async function resolveEdicao(candidatos, instrucao) {
     .map((l) => ({
       ...l,
       categoria: normalizeCategoria(l.categoria, l.tipo === 'entrada' ? vocab.entrada : vocab.saida),
+      banco: resolveBanco(l.banco, vocab.bancos),
     }));
   return { acao, ids, atualizados, motivo: String(parsed.motivo || '') };
 }

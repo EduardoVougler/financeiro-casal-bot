@@ -1,7 +1,8 @@
 // Domínio do controle financeiro do casal: bancos, pessoas e categorias.
 //
-// Regra: o BANCO define o dono do gasto. O mapeamento abaixo é a fonte da verdade
-// e é fácil de estender (novo banco = nova linha). Nomes normalizados em minúsculas.
+// Banco e titular são dimensões independentes: Eduardo e Maria podem ter contas
+// separadas na mesma instituição. O par { banco, autor } identifica de qual conta
+// veio o gasto; banco sozinho nunca determina a pessoa.
 
 export const PESSOAS = ['Eduardo', 'Maria'];
 
@@ -23,13 +24,16 @@ export function resolvePessoa(raw) {
   return APELIDOS[k] || (PESSOAS.includes(String(raw).trim()) ? String(raw).trim() : null);
 }
 
-// banco (chave normalizada) -> { nome de exibição, dono }
+// Bancos conhecidos de partida. A lista não é fechada: instituições novas passam
+// a integrar o vocabulário assim que aparecem em um lançamento confirmado.
 export const BANCOS = {
-  nubank: { nome: 'Nubank', dono: 'Maria' },
-  bb: { nome: 'Banco do Brasil', dono: 'Maria' },
-  inter: { nome: 'Inter', dono: 'Eduardo' },
-  bradesco: { nome: 'Bradesco', dono: 'Eduardo' },
+  nubank: { nome: 'Nubank' },
+  bb: { nome: 'Banco do Brasil' },
+  inter: { nome: 'Inter' },
+  bradesco: { nome: 'Bradesco' },
 };
+
+export const BANCOS_SEMENTE = Object.values(BANCOS).map((b) => b.nome);
 
 // Aliases que o parsing/transcrição pode produzir -> chave canônica do banco.
 const ALIASES = {
@@ -43,22 +47,41 @@ const ALIASES = {
   bradesco: 'bradesco',
 };
 
-// Resolve um texto livre para a chave canônica do banco (ou null se não reconhecer).
-export function resolveBanco(raw) {
-  if (!raw) return null;
-  const k = String(raw).trim().toLowerCase();
-  if (BANCOS[k]) return k;
-  return ALIASES[k] || null;
+function chaveBanco(raw) {
+  return String(raw)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-// Dono derivado do banco. Retorna null se o banco for desconhecido.
-export function donoDoBanco(bancoKey) {
-  const b = BANCOS[bancoKey];
-  return b ? b.dono : null;
+// Resolve um texto livre para a forma canônica. Bancos tradicionais mantêm as
+// chaves legadas; bancos novos preservam um nome de exibição e podem ser reusados
+// pela grafia já existente em `conhecidos`.
+export function resolveBanco(raw, conhecidos = []) {
+  if (!raw) return null;
+  const texto = String(raw).trim();
+  const k = chaveBanco(texto);
+  if (BANCOS[k]) return k;
+  if (ALIASES[k]) return ALIASES[k];
+  const usado = conhecidos.find(
+    (b) => chaveBanco(b) === k || chaveBanco(nomeDoBanco(b)) === k
+  );
+  if (usado) return usado;
+  return texto.charAt(0).toUpperCase() + texto.slice(1);
 }
 
 export function nomeDoBanco(bancoKey) {
   return BANCOS[bancoKey]?.nome || bancoKey || '—';
+}
+
+// Pessoa citada > quem enviou. Mantido no domínio (sem dependência de APIs) para
+// que a regra conta/titular seja única e facilmente testável.
+export function applyDono(lancamento, fallbackAutor, bancosConhecidos = []) {
+  const banco = resolveBanco(lancamento.banco, bancosConhecidos);
+  const autor = resolvePessoa(lancamento.autor) || fallbackAutor || null;
+  return { ...lancamento, banco, autor };
 }
 
 // ---- Categorias ----

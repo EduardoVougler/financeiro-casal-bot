@@ -20,18 +20,53 @@ ensureDirs();
 function readJson(file, fallback) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return fallback;
+  } catch (erro) {
+    if (erro.code === 'ENOENT') return fallback;
+
+    // Uma escrita anterior mantém a última versão válida em .bak. Recuperar
+    // desse arquivo é seguro; fingir que um JSON corrompido está vazio não é.
+    const backup = `${file}.bak`;
+    try {
+      const recuperado = JSON.parse(fs.readFileSync(backup, 'utf8'));
+      console.warn(`[store] ${file} inválido; usando backup ${backup}: ${erro.message}`);
+      return recuperado;
+    } catch {
+      throw new Error(`Não foi possível ler ${file}: ${erro.message}`);
+    }
   }
 }
 
 function writeJson(file, obj) {
-  fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temp, JSON.stringify(obj, null, 2), { encoding: 'utf8', mode: 0o600 });
+
+    // Só substitui o backup quando o arquivo atual é JSON válido. Assim uma
+    // corrupção preexistente não destrói também a última cópia recuperável.
+    if (fs.existsSync(file)) {
+      try {
+        JSON.parse(fs.readFileSync(file, 'utf8'));
+        fs.copyFileSync(file, `${file}.bak`);
+      } catch {
+        // Mantém o .bak anterior.
+      }
+    }
+    fs.renameSync(temp, file);
+  } catch (erro) {
+    try { fs.unlinkSync(temp); } catch {}
+    throw erro;
+  }
 }
 
 // ---- Estado global ----
 export function loadState() {
-  return readJson(statePath, { offset: 0, pending: {}, schedule: {} });
+  const state = readJson(statePath, { offset: 0, pending: {}, schedule: {} });
+  return {
+    ...state,
+    offset: Number.isInteger(state.offset) ? state.offset : 0,
+    pending: state.pending && typeof state.pending === 'object' ? state.pending : {},
+    schedule: state.schedule && typeof state.schedule === 'object' ? state.schedule : {},
+  };
 }
 
 export function saveState(state) {
@@ -99,20 +134,44 @@ export function categoriasUsadas() {
   return { saida: porFrequencia(contagem.saida), entrada: porFrequencia(contagem.entrada) };
 }
 
+// Vocabulário aberto de bancos, mais usados primeiro. Mantém bancos novos
+// consistentes sem exigir alteração em domain.js ou novo deploy.
+export function bancosUsados() {
+  const contagem = new Map();
+  let arquivos = [];
+  try {
+    arquivos = fs.readdirSync(monthsDir).filter((f) => f.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  for (const f of arquivos) {
+    const mes = readJson(path.join(monthsDir, f), { lancamentos: [] });
+    for (const l of mes.lancamentos || []) {
+      const banco = String(l.banco || '').trim();
+      if (banco) contagem.set(banco, (contagem.get(banco) || 0) + 1);
+    }
+  }
+  return [...contagem.entries()].sort((a, b) => b[1] - a[1]).map(([b]) => b);
+}
+
 export function saveMonth(month) {
   writeJson(path.join(monthsDir, `${month.key}.json`), month);
 }
 
 // Todo lançamento carrega um `id` estável — é por ele que dá para editar/remover
 // depois. Não pode ser a posição na lista: remover um item deslocaria todos os outros.
-function novoId() {
+export function novoId() {
   return randomUUID().slice(0, 8);
 }
 
 // Adiciona um lançamento (entrada ou saída) ao mês.
 export function addLancamento(lancamento, key = monthKey()) {
   const month = loadMonth(key);
-  month.lancamentos.push({ id: novoId(), ...lancamento, registrado_em: new Date().toISOString() });
+  const id = lancamento.id || novoId();
+  // Confirmações são reprocessáveis: se o bot cair depois de gravar o mês,
+  // mas antes de avançar o offset, o mesmo SIM não duplica o lançamento.
+  if (month.lancamentos.some((l) => l.id === id)) return month;
+  month.lancamentos.push({ ...lancamento, id, registrado_em: new Date().toISOString() });
   saveMonth(month);
   return month;
 }

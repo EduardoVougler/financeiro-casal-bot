@@ -125,7 +125,24 @@ const css = `
   .tbl td { padding: 7px 10px; border-bottom: 1px solid var(--line); }
   .tbl tbody tr:nth-child(2n) { background: var(--panel); }
   .tbl .r { text-align: right; }
-  .tbl-detail { font-size: 11px; }
+  .tbl-detail { font-size: 11px; table-layout: fixed; }
+  .tbl-detail thead { display: table-header-group; }
+  .tbl-detail tr { break-inside: avoid; page-break-inside: avoid; }
+  .tbl-detail th:nth-child(1), .tbl-detail td:nth-child(1) { width: 12%; }
+  .tbl-detail th:nth-child(2), .tbl-detail td:nth-child(2) { width: 38%; }
+  .tbl-detail th:nth-child(3), .tbl-detail td:nth-child(3) { width: 32%; }
+  .tbl-detail th:nth-child(4), .tbl-detail td:nth-child(4) { width: 18%; }
+  .cell-main { color: var(--ink); font-weight: 600; }
+  .cell-meta { color: var(--muted); font-size: 10px; margin-top: 1px; }
+  .amount { white-space: nowrap; font-size: 11.5px; }
+  .ledger-page {
+    break-before: page; page-break-before: always; break-inside: auto;
+    padding-top: 32px;
+  }
+  .ledger-kicker {
+    color: var(--brand); font-size: 10px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; margin-bottom: 5px;
+  }
   .bank-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: baseline; }
   .tag {
     display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 10px; font-weight: 600;
@@ -145,10 +162,13 @@ export function renderPdf(bodyHtml, baseName) {
   const pdfFile = path.join(reportsDir, `${baseName}.pdf`);
   fs.writeFileSync(htmlFile, html);
 
-  execSync(
-    `"${config.chromiumPath}" --headless --no-sandbox --disable-gpu --no-pdf-header-footer --print-to-pdf="${pdfFile}" "file://${htmlFile}"`,
-    { stdio: 'pipe' }
-  );
-  fs.unlinkSync(htmlFile);
+  try {
+    execSync(
+      `"${config.chromiumPath}" --headless --no-sandbox --disable-gpu --no-pdf-header-footer --print-to-pdf="${pdfFile}" "file://${htmlFile}"`,
+      { stdio: 'pipe', timeout: 60_000 }
+    );
+  } finally {
+    try { fs.unlinkSync(htmlFile); } catch {}
+  }
   return pdfFile;
 }

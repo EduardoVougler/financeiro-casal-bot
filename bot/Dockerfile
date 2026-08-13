@@ -14,13 +14,16 @@ ENV CHROMIUM_PATH=/usr/bin/chromium \
 
 WORKDIR /app
 
-# Instala dependências primeiro (cache de camada).
-COPY package.json ./
-RUN npm install --omit=dev
+# Instala versões exatas e reproduzíveis primeiro (cache de camada).
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY src ./src
 
 # Volume para persistir os dados do mês.
 VOLUME ["/data"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["node", "src/healthcheck.js"]
 
 CMD ["node", "src/index.js"]

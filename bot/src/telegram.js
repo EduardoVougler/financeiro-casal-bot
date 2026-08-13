@@ -11,6 +11,7 @@ async function call(method, body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
   });
   const json = await res.json();
   if (!json.ok) {
@@ -25,6 +26,7 @@ export async function getUpdates(offset, timeout = 30) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ offset, timeout, allowed_updates: ['message'] }),
+    signal: AbortSignal.timeout((timeout + 10) * 1000),
   });
   const json = await res.json();
   if (!json.ok) {
@@ -54,7 +56,8 @@ export function sendChatAction(chatId, action = 'typing') {
 export async function downloadFile(fileId, defaultMime = 'application/octet-stream') {
   const file = await call('getFile', { file_id: fileId });
   const url = `https://api.telegram.org/file/bot${config.telegramToken}/${file.file_path}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) throw new Error(`Download do Telegram falhou: HTTP ${res.status}`);
   const buffer = Buffer.from(await res.arrayBuffer());
   const mime = mimeFromPath(file.file_path, defaultMime);
   return { buffer, mime, filePath: file.file_path };
@@ -81,7 +84,11 @@ export async function sendDocument(chatId, filePath, caption = '') {
     new Blob([data], { type: 'application/pdf' }),
     filePath.split('/').pop()
   );
-  const res = await fetch(`${API}/sendDocument`, { method: 'POST', body: form });
+  const res = await fetch(`${API}/sendDocument`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(60_000),
+  });
   const json = await res.json();
   if (!json.ok) {
     throw new Error(`sendDocument falhou: ${json.error_code} ${json.description}`);

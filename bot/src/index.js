@@ -1,6 +1,7 @@
 // Bot financeiro do casal — loop principal (long-polling), confirmação de lançamentos
 // (texto/áudio/foto) e agendador do fechamento mensal.
 
+import fs from 'node:fs';
 import { config } from './config.js';
 import * as tg from './telegram.js';
 import * as store from './store.js';
@@ -9,6 +10,7 @@ import { transcribe } from './transcribe.js';
 import { nomeDoBanco } from './domain.js';
 import { buildReportHtml, buildAnnualReportHtml } from './report.js';
 import { renderPdf } from './pdf.js';
+import { dataParaExibicao, mesDoLancamento, normalizarData } from './dates.js';
 
 let state = store.loadState();
 
@@ -21,7 +23,6 @@ function autorDoChat(fromId) {
 }
 
 function isAllowed(chatId) {
-  if (!config.allowedChatIds.length) return true;
   return config.allowedChatIds.includes(String(chatId));
 }
 
@@ -41,7 +42,7 @@ function itemResumo(l, i, total) {
     linhas.push(`• Banco: ${l.banco ? nomeDoBanco(l.banco) : '—'}`);
     linhas.push(`• Forma: ${l.forma_pagamento || '—'}`);
   }
-  linhas.push(`• Data: ${l.data || 'hoje'}`);
+  linhas.push(`• Data: ${dataParaExibicao(l)}`);
   // Só destaca o mês quando não é o corrente — é o caso em que gravar errado passaria batido.
   const mes = mesDoLancamento(l);
   if (mes !== store.monthKey()) linhas.push(`• Mês: ${mes}`);
@@ -80,6 +81,7 @@ const AJUDA = [
   'Eu leio, mostro os dados e peço confirmação antes de gravar — responda *SIM* para gravar, ou escreva a correção ("o 2 é da Duda", "valor é 154,90"). Para desistir, diga "cancela".',
   '',
   '*As categorias são livres*: escreva do seu jeito ("academia", "ração do pet", "streaming") e eu passo a usar essa categoria daí em diante. Quando o gasto encaixar numa que já existe, eu reuso — pra não virar categoria repetida no relatório.',
+  '*Os bancos também são livres* e cada conta é identificada por banco + pessoa. Vocês dois podem ter Nubank, BB ou qualquer outro banco: diga "Eduardo Nubank" ou "Nubank da Duda" quando precisar indicar o titular.',
   '',
   'Pode mandar *vários de uma vez*, um por linha — eu leio todos e confirmo o lote.',
   'Se a primeira linha disser o mês, ele vale para o bloco inteiro:',
@@ -113,7 +115,13 @@ async function gerarEnviar(chatId, monthKeyStr, { parcial }) {
   const { html } = buildReportHtml(month, { parcial });
   const base = `relatorio-${monthKeyStr}${parcial ? '-parcial' : ''}`;
   const pdf = renderPdf(html, base);
-  await tg.sendDocument(chatId, pdf, `Relatório ${parcial ? 'parcial' : 'de fechamento'} — ${monthKeyStr}`);
+  try {
+    await tg.sendDocument(chatId, pdf, `Relatório ${parcial ? 'parcial' : 'de fechamento'} — ${monthKeyStr}`);
+  } finally {
+    // O PDF contém dados financeiros e já foi entregue pelo Telegram; não precisa
+    // permanecer acumulado no volume do bot.
+    try { fs.unlinkSync(pdf); } catch {}
+  }
 }
 
 async function gerarEnviarAnual(chatId, yearStr, { parcial }) {
@@ -126,7 +134,11 @@ async function gerarEnviarAnual(chatId, yearStr, { parcial }) {
   const { html } = buildAnnualReportHtml(yearData, { parcial });
   const base = `relatorio-anual-${yearStr}${parcial ? '-parcial' : ''}`;
   const pdf = renderPdf(html, base);
-  await tg.sendDocument(chatId, pdf, `Relatório anual ${parcial ? 'parcial' : 'de fechamento'} — ${yearStr}`);
+  try {
+    await tg.sendDocument(chatId, pdf, `Relatório anual ${parcial ? 'parcial' : 'de fechamento'} — ${yearStr}`);
+  } finally {
+    try { fs.unlinkSync(pdf); } catch {}
+  }
 }
 
 const MESES = {
@@ -154,37 +166,28 @@ function parseMonthArg(arg) {
   return null;
 }
 
-// Mês de destino, em ordem: competência declarada no cabeçalho ("informações de
-// agosto") > data do próprio lançamento (DD/MM) > mês atual. Sem isso, um bloco
-// enviado em 31/07 referente a agosto cairia todo em julho.
-function mesDoLancamento(l) {
-  const c = String(l.competencia || '').match(/^(\d{4})-(\d{2})$/);
-  if (c && +c[2] >= 1 && +c[2] <= 12) return `${c[1]}-${c[2]}`;
-  const m = String(l.data || '').match(/^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?$/);
-  if (!m) return store.monthKey();
-  const mes = +m[2];
-  if (mes < 1 || mes > 12) return store.monthKey();
-  let ano = m[3] ? +m[3] : new Date().getFullYear();
-  if (ano < 100) ano += 2000;
-  return `${ano}-${String(mes).padStart(2, '0')}`;
-}
-
 // Recebeu os lançamentos lidos (de texto/áudio/foto): deriva dono e pede confirmação.
 // Uma mensagem pode trazer vários — a confirmação é do lote inteiro.
 // chatId = onde responder (grupo ou privado); fromId = quem enviou (autor + chave da confirmação).
-async function proporLancamentos(chatId, fromId, lidosBrutos, origem) {
-  const lista = lidosBrutos.map((l) => applyDono({ ...l, origem }, autorDoChat(fromId)));
-  state.pending[fromId] = { tipo: 'novo', lancamentos: lista };
+async function proporLancamentos(chatId, fromId, lidosBrutos, origem, sourceUpdateId) {
+  const agora = new Date();
+  const lista = lidosBrutos.map((l) =>
+    applyDono(
+      { ...l, id: store.novoId(), data: normalizarData(l.data, agora), origem },
+      autorDoChat(fromId)
+    )
+  );
+  state.pending[fromId] = { tipo: 'novo', lancamentos: lista, sourceUpdateId };
   store.saveState(state);
   await tg.sendMessage(chatId, resumo(lista));
 }
 
 // Texto (digitado ou transcrito do áudio): descobre a intenção e roteia. Lançamento
 // vira proposta de confirmação; o resto (relatório, ajuda, cancelar) vai para atenderPedido.
-async function interpretarTexto(chatId, fromId, texto, origem) {
+async function interpretarTexto(chatId, fromId, texto, origem, sourceUpdateId) {
   const lido = await readFromText(texto);
   if (lido.intencao === 'lancamento' && lido.lancamentos.length) {
-    await proporLancamentos(chatId, fromId, lido.lancamentos, origem);
+    await proporLancamentos(chatId, fromId, lido.lancamentos, origem, sourceUpdateId);
     return;
   }
   // Mexer no que já foi gravado precisa da mensagem original (é ela que diz QUAL
@@ -194,7 +197,13 @@ async function interpretarTexto(chatId, fromId, texto, origem) {
     return;
   }
   if (lido.intencao === 'editar' || lido.intencao === 'remover') {
-    await proporEdicao(chatId, fromId, texto, lido.mes ? [lido.mes] : escopoDe(fromId));
+    await proporEdicao(
+      chatId,
+      fromId,
+      texto,
+      lido.mes ? [lido.mes] : escopoDe(fromId),
+      sourceUpdateId
+    );
     return;
   }
   // Disse "lancamento" mas não achou nada: trata como conversa, não como erro.
@@ -222,7 +231,8 @@ function linhaLancamento(l) {
   if (l.descricao && l.descricao !== l.categoria) partes.push(l.descricao);
   partes.push(l.autor || '—');
   if (l.banco) partes.push(`${nomeDoBanco(l.banco)}${l.forma_pagamento ? ` (${l.forma_pagamento})` : ''}`);
-  const data = l.data && l.data !== 'hoje' ? `${l.data} · ` : '';
+  const exibida = dataParaExibicao(l);
+  const data = exibida !== '—' ? `${exibida} · ` : '';
   return `${data}${partes.join(' · ')}`;
 }
 
@@ -254,7 +264,7 @@ async function listarLancamentos(chatId, fromId, mes) {
 
 // Resolve a instrução contra os lançamentos gravados e PROPÕE a mudança —
 // nada é alterado sem o SIM (remoção não tem desfazer).
-async function proporEdicao(chatId, fromId, texto, meses) {
+async function proporEdicao(chatId, fromId, texto, meses, sourceUpdateId) {
   await tg.sendChatAction(chatId, 'typing');
   const candidatos = store.lancamentosRecentes({ meses });
   if (!candidatos.length) {
@@ -267,7 +277,7 @@ async function proporEdicao(chatId, fromId, texto, meses) {
 
   if (r.acao === 'remover' && r.ids.length) {
     const itens = r.ids.map((id) => porId.get(id)).filter(Boolean);
-    state.pending[fromId] = { tipo: 'remover', meses, itens };
+    state.pending[fromId] = { tipo: 'remover', meses, itens, sourceUpdateId };
     store.saveState(state);
     await tg.sendMessage(
       chatId,
@@ -286,7 +296,7 @@ async function proporEdicao(chatId, fromId, texto, meses) {
       .map((depois) => ({ antes: porId.get(depois.id), depois }))
       .filter((x) => x.antes && mudancas(x.antes, x.depois).length);
     if (itens.length) {
-      state.pending[fromId] = { tipo: 'editar', meses, itens };
+      state.pending[fromId] = { tipo: 'editar', meses, itens, sourceUpdateId };
       store.saveState(state);
       await tg.sendMessage(chatId, resumoEdicao(itens));
       return;
@@ -352,12 +362,33 @@ function pendenteNormalizado(p) {
   return { tipo: 'novo', lancamentos: [p] };
 }
 
+async function reenviarConfirmacao(chatId, pendente) {
+  if (pendente.tipo === 'novo') {
+    await tg.sendMessage(chatId, resumo(pendente.lancamentos));
+    return;
+  }
+  if (pendente.tipo === 'editar') {
+    await tg.sendMessage(chatId, resumoEdicao(pendente.itens));
+    return;
+  }
+  await tg.sendMessage(
+    chatId,
+    [
+      pendente.itens.length === 1
+        ? '🗑 Vou *remover* este lançamento:'
+        : `🗑 Vou *remover* estes ${pendente.itens.length} lançamentos:`,
+      ...pendente.itens.map((l) => `• ${linhaLancamento(l)}`),
+      '',
+      'Confirma? Responda *SIM* — remoção não tem desfazer.',
+    ].join('\n')
+  );
+}
+
 // Executa o que foi confirmado com SIM: gravar novos, alterar ou remover.
 async function aplicarPendente(chatId, fromId, pendente) {
-  delete state.pending[fromId];
-
   if (pendente.tipo === 'remover') {
     const n = pendente.itens.filter((l) => store.removeLancamento(l.mes, l.id)).length;
+    delete state.pending[fromId];
     store.saveState(state);
     await tg.sendMessage(chatId, `🗑 ${n === 1 ? 'Lançamento removido' : `${n} lançamentos removidos`}.`);
     return;
@@ -366,20 +397,29 @@ async function aplicarPendente(chatId, fromId, pendente) {
   if (pendente.tipo === 'editar') {
     let n = 0;
     for (const { antes, depois } of pendente.itens) {
-      // Se a edição não nomeia a pessoa, a atual PERMANECE — sem isso o dono do banco
-      // venceria em applyDono e uma fatura dividida ("BB: 666 Eduardo / 809 Duda")
-      // voltaria toda para o dono do cartão na primeira edição de valor.
-      const alvo = { ...depois, autor: depois.autor || antes.autor };
+      // Se a edição não nomeia a pessoa, a atual permanece. Banco e titular são
+      // independentes, inclusive quando os dois possuem conta na mesma instituição.
+      const alvo = {
+        ...depois,
+        data: normalizarData(depois.data),
+        autor: depois.autor || antes.autor,
+      };
       const { id: _id, ...campos } = applyDono(alvo, antes.autor);
       if (store.updateLancamento(antes.mes, antes.id, campos)) n++;
     }
+    delete state.pending[fromId];
     store.saveState(state);
     await tg.sendMessage(chatId, `✏️ ${n === 1 ? 'Lançamento atualizado' : `${n} lançamentos atualizados`}.`);
     return;
   }
 
-  const lista = pendente.lancamentos;
+  // Pendências antigas podem ainda não ter id. Persiste os ids antes de começar
+  // o lote para que uma retomada após queda seja idempotente.
+  const lista = pendente.lancamentos.map((l) => ({ ...l, id: l.id || store.novoId() }));
+  state.pending[fromId] = { ...pendente, lancamentos: lista };
+  store.saveState(state);
   for (const l of lista) store.addLancamento(l, mesDoLancamento(l));
+  delete state.pending[fromId];
   store.saveState(state);
   const quantos = lista.length === 1 ? 'Lançamento gravado' : `${lista.length} lançamentos gravados`;
   await tg.sendMessage(chatId, `✅ ${quantos}. Pode mandar o próximo!`);
@@ -464,12 +504,20 @@ async function atenderComando(chatId, fromId, text) {
   }
 }
 
-async function handleMessage(msg) {
+async function handleMessage(msg, updateId) {
   const chatId = msg.chat.id;          // onde responder (grupo ou privado)
   const fromId = msg.from?.id ?? chatId; // quem enviou (autor + autorização + confirmação)
   // Em grupo, autoriza por PESSOA (from.id), não pelo id do grupo.
   if (!isAllowed(fromId)) {
     await tg.sendMessage(chatId, 'Desculpe, este bot é de uso restrito.');
+    return;
+  }
+
+  // Vale também para foto e áudio: uma atualização repetida depois de queda não
+  // deve pagar outra extração nem substituir a pendência que já foi criada.
+  const pendenteRepetida = pendenteNormalizado(state.pending[fromId]);
+  if (pendenteRepetida?.sourceUpdateId === updateId) {
+    await reenviarConfirmacao(chatId, pendenteRepetida);
     return;
   }
 
@@ -480,7 +528,7 @@ async function handleMessage(msg) {
       const best = msg.photo[msg.photo.length - 1]; // maior resolução
       const { buffer, mime } = await tg.downloadFile(best.file_id, 'image/jpeg');
       const lidos = await readFromImage(buffer, mime);
-      await proporLancamentos(chatId, fromId, lidos, 'foto');
+      await proporLancamentos(chatId, fromId, lidos, 'foto', updateId);
     } catch (e) {
       console.error('[foto]', e);
       await tg.sendMessage(chatId, `❌ Não consegui ler a foto: ${e.message}`, { markdown: false });
@@ -496,7 +544,7 @@ async function handleMessage(msg) {
       const { buffer, mime } = await tg.downloadFile(audio.file_id, 'audio/ogg');
       const texto = await transcribe(buffer, mime);
       // Áudio também pede relatório ("me manda o fechamento do mês passado").
-      await interpretarTexto(chatId, fromId, texto, 'audio');
+      await interpretarTexto(chatId, fromId, texto, 'audio', updateId);
     } catch (e) {
       console.error('[audio]', e);
       await tg.sendMessage(chatId, `❌ Áudio: ${e.message}`, { markdown: false });
@@ -534,16 +582,20 @@ async function handleMessage(msg) {
       if (pendente.tipo === 'novo') {
         // Correção em linguagem natural, aplicada sobre o lote inteiro.
         const origem = pendente.lancamentos[0]?.origem;
+        const agora = new Date();
         const corrigidos = (await applyCorrection(pendente.lancamentos, text)).map((l) =>
-          applyDono({ ...l, origem }, autorDoChat(fromId))
+          applyDono(
+            { ...l, id: store.novoId(), data: normalizarData(l.data, agora), origem },
+            autorDoChat(fromId)
+          )
         );
-        state.pending[fromId] = { tipo: 'novo', lancamentos: corrigidos };
+        state.pending[fromId] = { tipo: 'novo', lancamentos: corrigidos, sourceUpdateId: updateId };
         store.saveState(state);
         await tg.sendMessage(chatId, resumo(corrigidos));
       } else {
         // Edição/remoção: a pessoa está apontando outro alvo ("não, o 4") — resolve
         // de novo, no mesmo escopo de meses.
-        await proporEdicao(chatId, fromId, text, pendente.meses);
+        await proporEdicao(chatId, fromId, text, pendente.meses, updateId);
       }
     } catch (e) {
       console.error('[pendente]', e);
@@ -555,7 +607,7 @@ async function handleMessage(msg) {
   // Texto solto → o modelo decide se é lançamento ou pedido (relatório, ajuda…).
   await tg.sendChatAction(chatId, 'typing');
   try {
-    await interpretarTexto(chatId, fromId, text, 'texto');
+    await interpretarTexto(chatId, fromId, text, 'texto', updateId);
   } catch (e) {
     console.error('[texto]', e);
     await tg.sendMessage(chatId, `❌ Não consegui processar a mensagem: ${e.message}`, {
@@ -565,20 +617,32 @@ async function handleMessage(msg) {
 }
 
 // ---- Agendador: fechamento mensal (dia X às HH fecha o mês anterior) ----
+const scheduleRunning = new Set();
+
 async function tickSchedule() {
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
+  const today = `${store.monthKey(now)}-${String(now.getDate()).padStart(2, '0')}`;
   const hour = now.getHours();
   const chat = config.reportChatId;
   if (!chat) return;
 
-  if (now.getDate() === config.monthlyDay && hour === config.monthlyHour && state.schedule.monthly !== today) {
-    state.schedule.monthly = today;
-    store.saveState(state);
+  if (
+    now.getDate() === config.monthlyDay &&
+    hour >= config.monthlyHour &&
+    state.schedule.monthly !== today &&
+    !scheduleRunning.has('monthly')
+  ) {
+    scheduleRunning.add('monthly');
     try {
       await gerarEnviar(chat, store.previousMonthKey(), { parcial: false });
+      // Só considera concluído depois que o Telegram aceitou o documento. Em caso
+      // de falha, o tick seguinte tenta novamente dentro da mesma hora.
+      state.schedule.monthly = today;
+      store.saveState(state);
     } catch (e) {
       console.error('[schedule] mensal:', e.message);
+    } finally {
+      scheduleRunning.delete('monthly');
     }
   }
 
@@ -586,15 +650,19 @@ async function tickSchedule() {
   if (
     now.getMonth() === 11 &&
     now.getDate() === 31 &&
-    hour === config.annualHour &&
-    state.schedule.annual !== today
+    hour >= config.annualHour &&
+    state.schedule.annual !== today &&
+    !scheduleRunning.has('annual')
   ) {
-    state.schedule.annual = today;
-    store.saveState(state);
+    scheduleRunning.add('annual');
     try {
       await gerarEnviarAnual(chat, store.yearKey(), { parcial: false });
+      state.schedule.annual = today;
+      store.saveState(state);
     } catch (e) {
       console.error('[schedule] anual:', e.message);
+    } finally {
+      scheduleRunning.delete('annual');
     }
   }
 }
@@ -608,16 +676,16 @@ async function main() {
   while (true) {
     try {
       const updates = await tg.getUpdates(state.offset + 1, 30);
+      fs.writeFileSync(
+        process.env.HEALTHCHECK_FILE || '/tmp/financeiro-casal-bot.healthy',
+        new Date().toISOString()
+      );
       for (const u of updates) {
+        // Confirma a atualização ao Telegram somente depois do processamento. Se o
+        // processo cair no meio, ela volta no próximo getUpdates em vez de sumir.
+        if (u.message) await handleMessage(u.message, u.update_id);
         state.offset = u.update_id;
         store.saveState(state);
-        if (u.message) {
-          try {
-            await handleMessage(u.message);
-          } catch (e) {
-            console.error('[handleMessage]', e);
-          }
-        }
       }
     } catch (e) {
       console.error('[getUpdates]', e.message);
