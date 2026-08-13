@@ -12,7 +12,7 @@ import {
   normalizarData,
 } from '../src/dates.js';
 import { applyDono, normalizeCategoria, resolveBanco, resolvePessoa } from '../src/domain.js';
-import { buildReportHtml } from '../src/report.js';
+import { buildAnnualReportHtml, buildReportHtml } from '../src/report.js';
 
 const agora = new Date(2026, 7, 13, 12, 0, 0);
 
@@ -82,7 +82,7 @@ test('extrato mensal é compacto, sinaliza tipo pelo valor e não duplica catego
       { tipo: 'entrada', valor: 1000, categoria: 'Freela', descricao: 'Site do cliente', autor: 'Maria', data: '04/08' },
     ],
   });
-  const extrato = html.slice(html.indexOf('ledger-page'));
+  const extrato = html.slice(html.indexOf('ledger-kicker'));
   assert.match(extrato, /<th>Data<\/th><th>Lançamento<\/th><th>Conta<\/th><th class="r">Valor<\/th>/);
   assert.doesNotMatch(extrato, /<th>Tipo<\/th>|<th>Pessoa<\/th>|<th>Categoria<\/th>|<th>Descrição<\/th>/);
   assert.equal((extrato.match(/>Mercado</g) || []).length, 1);
@@ -91,6 +91,33 @@ test('extrato mensal é compacto, sinaliza tipo pelo valor e não duplica catego
   assert.match(extrato, /− R\$ 42,00/);
   assert.match(extrato, /\+ R\$ 1\.000,00/);
   assert.match(extrato, /Site do cliente[\s\S]*?Freela/);
+});
+
+test('relatório anual inclui extrato em modo compacto', () => {
+  const lancamentos = [
+    { tipo: 'entrada', valor: 1000, categoria: 'Salário', autor: 'Eduardo', data: '05/01' },
+    { tipo: 'saida', valor: 250, categoria: 'Mercado', autor: 'Maria', banco: 'nubank', forma_pagamento: 'credito', data: '10/01' },
+  ];
+  const { html } = buildAnnualReportHtml({
+    year: 2026,
+    months: { '2026-01': { key: '2026-01', lancamentos } },
+    lancamentos,
+  });
+  assert.match(html, /class="block ledger ledger-compact"/);
+  assert.match(html, /Extrato do período/);
+  assert.match(html, /Movimentações <span class="count">2<\/span>/);
+});
+
+test('extrato longo é paginado em blocos com cabeçalho de continuação', () => {
+  const lancamentos = Array.from({ length: 41 }, (_, i) => ({
+    tipo: 'saida', valor: i + 1, categoria: 'Outros', descricao: `Item ${i + 1}`,
+    autor: 'Eduardo', banco: 'nubank', forma_pagamento: 'credito', data: '01/08',
+  }));
+  const { html } = buildReportHtml({ key: '2026-08', lancamentos });
+  assert.equal((html.match(/class="block ledger ledger-page"/g) || []).length, 3);
+  assert.equal((html.match(/Extrato do período · continuação/g) || []).length, 2);
+  assert.match(html, /Movimentações <span class="count">21–40 de 41<\/span>/);
+  assert.match(html, /Movimentações <span class="count">41–41 de 41<\/span>/);
 });
 
 test('relatório mostra a data recuperada, nunca a palavra hoje', () => {

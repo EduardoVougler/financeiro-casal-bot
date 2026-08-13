@@ -19,7 +19,14 @@ function money(n) {
   return (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function reais(n) {
-  return `R$ ${money(n)}`;
+  const v = Number(n) || 0;
+  // Negativo com sinal tipográfico antes do R$, igual ao extrato: "− R$ 1.234,56".
+  return `${v < 0 ? '− ' : ''}R$ ${money(Math.abs(v))}`;
+}
+// Mesmo sinal tipográfico para valores sem o prefixo R$ (tabelas mês a mês).
+function moneySinal(n) {
+  const v = Number(n) || 0;
+  return `${v < 0 ? '− ' : ''}${money(Math.abs(v))}`;
 }
 function pct1(x) {
   return `${((x || 0) * 100).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
@@ -181,30 +188,18 @@ function sectionBanco(saidas) {
   </section>`;
 }
 
-function foot() {
-  return `<footer class="foot">Gerado em ${new Date().toLocaleDateString('pt-BR')} · Financeiro do Casal</footer>`;
+function foot({ compacto = false } = {}) {
+  return `<footer class="foot${compacto ? ' foot-compact' : ''}">Gerado em ${new Date().toLocaleDateString('pt-BR')} · Financeiro do Casal</footer>`;
 }
 
-// ================= Relatório MENSAL =================
+// Extrato de movimentações (tabela detalhada). Compartilhado entre os relatórios
+// mensal e anual. Com poucos lançamentos o extrato flui na mesma página; com
+// muitos, começa em página nova para não quebrar o cabeçalho da tabela.
+const LIMITE_EXTRATO_PAGINA_NOVA = 8;
+const LANCAMENTOS_POR_PAGINA = 20;
 
-export function buildReportHtml(month, { parcial = false } = {}) {
-  const [ano, mes] = month.key.split('-');
-  const nomeMes = MESES[Number(mes) - 1];
-  const lancs = month.lancamentos || [];
-  const entradas = lancs.filter((l) => l.tipo === 'entrada');
-  const saidas = lancs.filter((l) => l.tipo === 'saida');
-
-  const badge = parcial
-    ? `<span class="badge badge-parcial">Parcial · até ${new Date().toLocaleDateString('pt-BR')}</span>`
-    : `<span class="badge badge-fechado">Fechamento do mês</span>`;
-
-  const hero = heroBlock({ periodo: `${nomeMes} <b>${ano}</b>`, badge });
-  const kpis = kpisBlock(soma(entradas), soma(saidas), {
-    legenda: 'no mês',
-    saldoSub: (soma(entradas) - soma(saidas)) >= 0 ? 'sobrou este mês' : 'ficou negativo',
-  });
-
-  const linhasLanc = lancs
+function linhasLancamentos(lancs) {
+  return lancs
     .map((l) => {
       const isIn = l.tipo === 'entrada';
       const descricao = String(l.descricao || '').trim();
@@ -230,18 +225,54 @@ export function buildReportHtml(month, { parcial = false } = {}) {
       </tr>`;
     })
     .join('');
+}
 
-  const secLanc = `
-  <section class="block ledger-page">
-    <div class="ledger-kicker">Extrato do período</div>
-    <h2>Movimentações <span class="count">${lancs.length}</span></h2>
-    <table class="tbl tbl-detail">
-      <thead><tr><th>Data</th><th>Lançamento</th><th>Conta</th><th class="r">Valor</th></tr></thead>
-      <tbody>${linhasLanc}</tbody>
-    </table>
-  </section>`;
+function sectionExtrato(
+  lancs,
+  { paginaNova = lancs.length > LIMITE_EXTRATO_PAGINA_NOVA, compacto = false } = {}
+) {
+  if (!lancs.length) return '';
+  const partes = [];
+  for (let i = 0; i < lancs.length; i += LANCAMENTOS_POR_PAGINA) {
+    partes.push(lancs.slice(i, i + LANCAMENTOS_POR_PAGINA));
+  }
+  // Um apêndice longo sempre começa em folha própria. Assim cada continuação
+  // tem margens e cabeçalho previsíveis, independentemente do Chromium usado.
+  const primeiraEmPaginaNova = paginaNova || partes.length > 1;
+  return partes.map((parte, indice) => {
+    const inicio = indice * LANCAMENTOS_POR_PAGINA;
+    return `
+    <section class="block ledger${(indice > 0 || primeiraEmPaginaNova) ? ' ledger-page' : ''}${compacto ? ' ledger-compact' : ''}">
+      <div class="ledger-kicker">Extrato do período${indice ? ' · continuação' : ''}</div>
+      <h2>Movimentações <span class="count">${indice ? `${inicio + 1}–${inicio + parte.length} de ` : ''}${lancs.length}</span></h2>
+      <table class="tbl tbl-detail">
+        <thead><tr><th>Data</th><th>Lançamento</th><th>Conta</th><th class="r">Valor</th></tr></thead>
+        <tbody>${linhasLancamentos(parte)}</tbody>
+      </table>
+    </section>`;
+  }).join('');
+}
 
-  const body = `<div class="report">${hero}${kpis}${sectionPessoa(entradas, saidas)}${sectionCategoria(saidas)}${sectionBanco(saidas)}${secLanc}${foot()}</div>`;
+// ================= Relatório MENSAL =================
+
+export function buildReportHtml(month, { parcial = false } = {}) {
+  const [ano, mes] = month.key.split('-');
+  const nomeMes = MESES[Number(mes) - 1];
+  const lancs = month.lancamentos || [];
+  const entradas = lancs.filter((l) => l.tipo === 'entrada');
+  const saidas = lancs.filter((l) => l.tipo === 'saida');
+
+  const badge = parcial
+    ? `<span class="badge">Parcial · até ${new Date().toLocaleDateString('pt-BR')}</span>`
+    : `<span class="badge">Fechamento do mês</span>`;
+
+  const hero = heroBlock({ periodo: `${nomeMes} <b>${ano}</b>`, badge });
+  const kpis = kpisBlock(soma(entradas), soma(saidas), {
+    legenda: 'no mês',
+    saldoSub: (soma(entradas) - soma(saidas)) >= 0 ? 'sobrou este mês' : 'ficou negativo',
+  });
+
+  const body = `<div class="report">${hero}${kpis}${sectionPessoa(entradas, saidas)}${sectionCategoria(saidas)}${sectionBanco(saidas)}${sectionExtrato(lancs)}${foot()}</div>`;
   return { html: body };
 }
 
@@ -255,8 +286,8 @@ export function buildAnnualReportHtml(yearData, { parcial = false } = {}) {
   const saidas = lancs.filter((l) => l.tipo === 'saida');
 
   const badge = parcial
-    ? `<span class="badge badge-parcial">Parcial · até ${new Date().toLocaleDateString('pt-BR')}</span>`
-    : `<span class="badge badge-fechado">Fechamento do ano</span>`;
+    ? `<span class="badge">Parcial · até ${new Date().toLocaleDateString('pt-BR')}</span>`
+    : `<span class="badge">Fechamento do ano</span>`;
 
   const hero = heroBlock({ periodo: `Ano <b>${year}</b>`, badge });
   const kpis = kpisBlock(soma(entradas), soma(saidas), {
@@ -286,7 +317,7 @@ export function buildAnnualReportHtml(yearData, { parcial = false } = {}) {
         <div class="month-bar"><div class="mb-fill ${pos ? 'mb-pos' : 'mb-neg'}" style="width:${w.toFixed(1)}%"></div></div>
         <div class="month-num pos">${money(e)}</div>
         <div class="month-num neg">${money(s)}</div>
-        <div class="month-num"><b class="${pos ? 'pos' : 'neg'}">${money(saldo)}</b></div>
+        <div class="month-num"><b class="${pos ? 'pos' : 'neg'}">${moneySinal(saldo)}</b></div>
       </div>`;
     })
     .join('');
@@ -307,7 +338,7 @@ export function buildAnnualReportHtml(yearData, { parcial = false } = {}) {
         <div class="month-name">Ano</div><div class="month-bar"></div>
         <div class="month-num pos">${money(totE)}</div>
         <div class="month-num neg">${money(totS)}</div>
-        <div class="month-num"><b class="${totE - totS >= 0 ? 'pos' : 'neg'}">${money(totE - totS)}</b></div>
+        <div class="month-num"><b class="${totE - totS >= 0 ? 'pos' : 'neg'}">${moneySinal(totE - totS)}</b></div>
       </div>
     </div>
   </section>`
@@ -318,6 +349,8 @@ export function buildAnnualReportHtml(yearData, { parcial = false } = {}) {
     ? `<section class="block"><p class="note">Média de gastos por mês (com movimento): <b>${reais(mediaMes)}</b> · ${linhasMes.length} ${linhasMes.length === 1 ? 'mês' : 'meses'} com lançamentos.</p></section>`
     : '';
 
-  const body = `<div class="report">${hero}${kpis}${secMes}${sectionPessoa(entradas, saidas)}${sectionCategoria(saidas)}${sectionBanco(saidas)}${secMedia}${foot()}</div>`;
+  // No anual o extrato é um apêndice longo: flui a partir de onde o conteúdo
+  // termina, sem forçar página nova (evita páginas quase vazias no meio).
+  const body = `<div class="report">${hero}${kpis}${secMes}${secMedia}${sectionPessoa(entradas, saidas)}${sectionCategoria(saidas)}${sectionBanco(saidas)}${sectionExtrato(lancs, { paginaNova: false, compacto: true })}${foot({ compacto: true })}</div>`;
   return { html: body };
 }

@@ -19,6 +19,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY src ./src
+COPY assets ./assets
 
 # Volume para persistir os dados do mês.
 VOLUME ["/data"]
